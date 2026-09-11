@@ -557,6 +557,59 @@ public static class BaseItemExtensions
         data[key] = JsonSerializer.SerializeToElement(value);
         item.ExternalId = JsonSerializer.Serialize(data);
     }
+
+    private static readonly HashSet<string> SubtitleExtensions = new(
+        StringComparer.OrdinalIgnoreCase
+    )
+    {
+        "vtt",
+        "srt",
+        "ass",
+        "ssa",
+        "sub",
+        "idx",
+        "smi",
+    };
+
+    /// <summary>
+    /// Subtitle files saved for a stream item in its internal metadata folder, named
+    /// <c>{filename}.{lang}.{ext}</c> or <c>{filename}.{lang}.{N}.{ext}</c>. Jellyfin never records
+    /// them as media streams because the item has no local file, so Gelato has to look itself.
+    /// </summary>
+    public static IEnumerable<(string Path, string Language, string Codec)> GetGelatoSubtitleFiles(
+        this BaseItem item
+    )
+    {
+        var gelatoFilename = item.GelatoData<string>("filename");
+        if (string.IsNullOrEmpty(gelatoFilename))
+            yield break;
+
+        var metaPath = item.GetInternalMetadataPath();
+        if (!Directory.Exists(metaPath))
+            yield break;
+
+        var baseName = Path.GetFileNameWithoutExtension(gelatoFilename);
+
+        foreach (var file in Directory.EnumerateFiles(metaPath))
+        {
+            var fname = Path.GetFileName(file);
+
+            // Must start with baseName + "."
+            if (!fname.StartsWith(baseName + ".", StringComparison.OrdinalIgnoreCase))
+                continue;
+
+            var ext = Path.GetExtension(fname).TrimStart('.');
+            if (!SubtitleExtensions.Contains(ext))
+                continue;
+
+            // Parse language from suffix: {baseName}.{lang}.{ext} or {baseName}.{lang}.{N}.{ext}
+            var suffix = fname.Substring(baseName.Length + 1); // everything after "baseName."
+            var parts = Path.GetFileNameWithoutExtension(suffix).Split('.');
+            var langCode = parts.Length > 0 ? parts[0] : "und";
+
+            yield return (file, langCode, ext.ToLowerInvariant());
+        }
+    }
 }
 
 public static class StringExtensions
