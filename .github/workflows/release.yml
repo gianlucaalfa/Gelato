@@ -6,26 +6,25 @@ on:
 jobs:
   release:
     runs-on: ubuntu-latest
-    
+
     permissions:
       contents: write
-    
+
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
         with:
           token: ${{ secrets.RELEASE_TOKEN }}
           fetch-depth: 0
-      
-      - name: Configure Git
-        run: |
-          git config user.name "${{ github.repository_owner }}"
-          git config user.email "${{ github.event.pusher.email || format('{0}@users.noreply.github.com', github.repository_owner) }}"
-      
-      - name: Set up git-cliff
-        uses: kenji-miyake/setup-git-cliff@v1
 
-      - name: Run make release
-        run: make release
+      - name: Create GitHub release from build.yaml version
         env:
-          GITHUB_TOKEN: ${{ secrets.RELEASE_TOKEN }}
+          GH_TOKEN: ${{ secrets.RELEASE_TOKEN }}
+        run: |
+          VERSION="$(sed -n 's/^version: *"\\(.*\\)"/\\1/p' build.yaml)"
+          if [ -z "$VERSION" ]; then
+            echo "Unable to read version from build.yaml"
+            exit 1
+          fi
+          echo "Creating release v$VERSION"
+          gh release create "v$VERSION"             --target "${GITHUB_SHA}"             --title "v$VERSION"             --generate-notes
