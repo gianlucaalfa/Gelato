@@ -21,10 +21,10 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.RELEASE_TOKEN }}
         run: |
-          VERSION="$(sed -n 's/^version: *"\\(.*\\)"/\\1/p' build.yaml)"
+          VERSION="$(sed -n 's/^version: *"\(.*\)"/\1/p' build.yaml)"
           if [ -z "$VERSION" ]; then
             echo "Unable to read version from build.yaml"
             exit 1
           fi
           echo "Creating release v$VERSION"
-          gh release create "v$VERSION"             --target "${GITHUB_SHA}"             --title "v$VERSION"             --generate-notes
+          gh release create "v$VERSION" --target "${GITHUB_SHA}" --title "v$VERSION" --generate-notes
