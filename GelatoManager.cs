@@ -271,22 +271,58 @@ public sealed class GelatoManager(
     /// </summary>
     public BaseItem? FindPrimaryForStream(BaseItem streamRow, User? user = null)
     {
-        if (streamRow is not Episode episode)
-            return FindExistingItem(streamRow, user);
+        if (streamRow is Episode episode)
+        {
+            // Same lookup GetStaticMediaSources uses to find an episode's stream rows.
+            var episodeQuery = new InternalItemsQuery
+            {
+                IncludeItemTypes = [BaseItemKind.Episode],
+                ParentId = episode.SeasonId,
+                IndexNumber = episode.IndexNumber,
+                Recursive = false,
+                ExcludeTags = [StreamTag],
+                User = user,
+                IsDeadPerson = true, // skip filter marker
+            };
 
-        // Same lookup GetStaticMediaSources uses to find an episode's stream rows.
+            return libraryManager.GetItemList(episodeQuery).FirstOrDefault(x => !x.HasStreamTag());
+        }
+
+        // Stream rows copy all of the primary's provider ids, and some are shared between
+        // movies: every movie of a collection has the same TmdbCollection id. Match on the
+        // Stremio id the row was synced for instead - the association GetStaticMediaSources
+        // uses to list a movie's rows.
+        var stremioId = streamRow.GetProviderId("Stremio");
+        if (string.IsNullOrEmpty(stremioId))
+            return null;
+
         var query = new InternalItemsQuery
         {
-            IncludeItemTypes = [BaseItemKind.Episode],
-            ParentId = episode.SeasonId,
-            IndexNumber = episode.IndexNumber,
-            Recursive = false,
+            IncludeItemTypes = [streamRow.GetBaseItemKind()],
+            // A local movie has no Stremio id; its stream rows use its Imdb id.
+            HasAnyProviderId = new Dictionary<string, string>
+            {
+                { "Stremio", stremioId },
+                { nameof(MetadataProvider.Imdb), stremioId },
+            },
+            Recursive = true,
             ExcludeTags = [StreamTag],
             User = user,
             IsDeadPerson = true, // skip filter marker
         };
 
-        return libraryManager.GetItemList(query).FirstOrDefault(x => !x.HasStreamTag());
+        var candidates = libraryManager
+            .GetItemList(query)
+            .Where(x =>
+                !x.HasStreamTag()
+                && StremioUri.FromBaseItem(x)?.ExternalId == stremioId
+            )
+            .ToList();
+
+        // A movie that exists more than once (two libraries, per-user folders) matches more
+        // than once. SyncStreams puts a row in the same folder as its movie, so prefer that one.
+        return candidates.FirstOrDefault(x => x.ParentId == streamRow.ParentId)
+            ?? candidates.FirstOrDefault();
     }
 
     /// <summary>
@@ -554,11 +590,16 @@ public sealed class GelatoManager(
             .Where(s => s is not null)
             .ToList();
 
-        // Get existing streams
+        // Get existing streams. A movie's rows only by Stremio id: movies of a collection share
+        // the TmdbCollection id, and the other movies' rows would be treated as stale below.
+        // Episodes keep matching on all ids, which also finds rows synced under an older
+        // Stremio id (GetStaticMediaSources lists episode rows by season and index).
         var query = new InternalItemsQuery
         {
             IncludeItemTypes = [isEpisode ? BaseItemKind.Episode : BaseItemKind.Movie],
-            HasAnyProviderId = streamProviderIds,
+            HasAnyProviderId = isEpisode
+                ? streamProviderIds
+                : new Dictionary<string, string> { { "Stremio", uri.ExternalId } },
             Recursive = true,
             IsDeadPerson = true,
             //  IsVirtualItem = true,
@@ -879,13 +920,17 @@ public sealed class GelatoManager(
             .OfType<Episode>()
             .Where(x => !x.IsStream() && x.IndexNumber.HasValue && x.ParentIndexNumber.HasValue)
             .GroupBy(e => e.ParentIndexNumber!.Value)
-            .ToDictionary(g => g.Key, g => g.Select(e => e.IndexNumber!.Value).ToHashSet());
+            .ToDictionary(
+                g => g.Key,
+                g => g.GroupBy(e => e.IndexNumber!.Value).ToDictionary(n => n.Key, n => n.First())
+            );
 
         var seasonsInserted = 0;
         var episodesInserted = 0;
 
         var newSeasons = new List<Season>();
         var allNewEpisodes = new List<Episode>();
+        var updatedEpisodes = new List<Episode>();
 
         var seriesStremioId = series.GetProviderId("Stremio");
         var seriesPresentationKey = series.GetPresentationUniqueKey();
@@ -952,8 +997,8 @@ public sealed class GelatoManager(
             }
 
             // Look up existing episodes for this season from the pre-fetched dict
-            var existingEpisodeNumbers = existingEpisodesBySeason.TryGetValue(seasonIndex, out var epNums)
-                ? epNums
+            var existingEpisodes = existingEpisodesBySeason.TryGetValue(seasonIndex, out var eps)
+                ? eps
                 : [];
             foreach (var epMeta in seasonGroup)
             {
@@ -971,12 +1016,14 @@ public sealed class GelatoManager(
                     continue;
                 }
 
-                if (existingEpisodeNumbers.Contains(index.Value))
+                if (existingEpisodes.TryGetValue(index.Value, out var existingEpisode))
                 {
-                    _log.LogTrace(
-                        "Episode {EpisodeName} already exists, skipping",
-                        epMeta.GetName()
-                    );
+                    // Local episodes (no Stremio id) keep the metadata of their own library.
+                    if (existingEpisode.IsGelato() && ApplyEpisodeMeta(existingEpisode, epMeta))
+                    {
+                        _log.LogTrace("Updated episode {EpisodeName}", existingEpisode.Name);
+                        updatedEpisodes.Add(existingEpisode);
+                    }
                     continue;
                 }
 
@@ -1026,17 +1073,143 @@ public sealed class GelatoManager(
             await ReattachWatchStateAsync(allNewEpisodes, ct).ConfigureAwait(false);
         }
 
+        if (updatedEpisodes.Count > 0)
+        {
+            // The episodes came fresh from the database, and the library manager caches only new
+            // items, so register them: a cached copy would keep serving the placeholder, and
+            // saving that copy later would write it back.
+            foreach (var group in updatedEpisodes.GroupBy(e => e.ParentId))
+            {
+                await libraryManager
+                    .UpdateItemsAsync(
+                        group.ToList(),
+                        group.First().GetParent() ?? series,
+                        ItemUpdateType.MetadataImport,
+                        ct
+                    )
+                    .ConfigureAwait(false);
+            }
+
+            foreach (var episode in updatedEpisodes)
+            {
+                libraryManager.RegisterItem(episode);
+            }
+        }
+
         stopwatch.Stop();
 
         _log.LogDebug(
-            "Sync completed for {SeriesName}: {SeasonsInserted} season(s) and {EpisodesInserted} episode(s) in {Dur}",
+            "Sync completed for {SeriesName}: {SeasonsInserted} season(s) and {EpisodesInserted} episode(s) inserted, {EpisodesUpdated} episode(s) updated in {Dur}",
             series.Name,
             seasonsInserted,
             episodesInserted,
+            updatedEpisodes.Count,
             stopwatch.Elapsed.TotalSeconds
         );
 
         return series;
+    }
+
+    /// <summary>
+    /// Brings an existing Gelato episode up to date with the addon's meta.
+    /// </summary>
+    /// <remarks>
+    /// The tree sync used to skip every episode it had created before, so an episode added
+    /// ahead of its release kept the addon's placeholder for good: "Episode 1", no overview, no
+    /// runtime, the series backdrop as thumbnail. Only values the meta has are taken, and fields
+    /// someone locked are left alone. The runtime is only filled in, since a probe may have
+    /// measured a better one, and dates are compared by day, so a meta that carries a time of
+    /// day does not rewrite every episode on every run.
+    /// </remarks>
+    /// <returns>Whether anything changed, i.e. whether the episode needs to be saved.</returns>
+    private bool ApplyEpisodeMeta(Episode episode, StremioMeta meta)
+    {
+        if (episode.IsLocked)
+            return false;
+
+        var locked = episode.LockedFields ?? [];
+        var changed = false;
+
+        var name = meta.GetName();
+        if (
+            !string.IsNullOrWhiteSpace(name)
+            && name != episode.Name
+            && !locked.Contains(MetadataField.Name)
+        )
+        {
+            episode.Name = name;
+            changed = true;
+        }
+
+        var overview = meta.Description ?? meta.Overview;
+        if (
+            !string.IsNullOrWhiteSpace(overview)
+            && overview != episode.Overview
+            && !locked.Contains(MetadataField.Overview)
+        )
+        {
+            episode.Overview = overview;
+            changed = true;
+        }
+
+        if (
+            episode.RunTimeTicks is null or 0
+            && Utils.ParseToTicks(meta.Runtime) is { } runtime
+            && !locked.Contains(MetadataField.Runtime)
+        )
+        {
+            episode.RunTimeTicks = runtime;
+            changed = true;
+        }
+
+        if (meta.GetPremiereDate() is { } premiere && premiere.Date != episode.PremiereDate?.Date)
+        {
+            episode.PremiereDate = premiere;
+            episode.EndDate = premiere;
+            episode.ProductionYear = premiere.Year;
+            changed = true;
+        }
+
+        if (
+            !string.IsNullOrWhiteSpace(meta.Thumbnail)
+            && meta.Thumbnail != episode.GetProviderId("StremioThumb")
+        )
+        {
+            episode.SetProviderId("StremioThumb", meta.Thumbnail);
+            try
+            {
+                ProviderManagerDecorator.SetRemoteImage(
+                    appPaths,
+                    episode,
+                    ImageType.Primary,
+                    null,
+                    meta.Poster ?? meta.Thumbnail
+                );
+            }
+            catch (IOException ex)
+            {
+                // Another sync of the same series is writing the same image; keep the rest.
+                _log.LogDebug(ex, "Could not update the image of {EpisodeName}", episode.Name);
+            }
+            changed = true;
+        }
+
+        if (
+            meta.TvdbEpisodeId() is { } tvdbId
+            && tvdbId != episode.GetProviderId(MetadataProvider.Tvdb)
+        )
+        {
+            episode.SetProviderId(MetadataProvider.Tvdb, tvdbId);
+            changed = true;
+        }
+
+        if (changed)
+        {
+            episode.DateModified = DateTime.UtcNow;
+            episode.DateLastSaved = DateTime.UtcNow;
+        }
+
+        return changed;
     }
 
     /// <summary>
