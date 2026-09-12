@@ -8,7 +8,15 @@
     "owner": "gianlucaalfa",
     "versions": [
       {
-        "changelog": "## [0.26.17.2]\n\nRelease for the gianlucaalfa/Gelato fork.",
+        "changelog": "<!-- Release notes generated using configuration in .github/release.yml at 78aba818a315bf08855d4c2c0216bb07726788ec -->\n\n\n\n**Full Changelog**: https://github.com/gianlucaalfa/Gelato/compare/v0.26.17.2...v0.26.17.3",
+        "checksum": "82961aef5f2cbdf1a0498ded2f697e7b",
+        "sourceUrl": "https://github.com/gianlucaalfa/Gelato/releases/download/v0.26.17.3/gelato_0.26.17.3.zip",
+        "targetAbi": "12.0.0.0",
+        "timestamp": "2026-09-12T22:51:36Z",
+        "version": "0.26.17.3"
+      },
+      {
+        "changelog": "<!-- Release notes generated using configuration in .github/release.yml at c98b87c780ed5e69b62179f58e9c08211066df35 -->\n\n\n\n**Full Changelog**: https://github.com/gianlucaalfa/Gelato/compare/0.1.0...v0.26.17.2",
         "checksum": "59c4dbaef2fd7a9b72b43e8a06e01528",
         "sourceUrl": "https://github.com/gianlucaalfa/Gelato/releases/download/v0.26.17.2/gelato_0.26.17.2.zip",
         "targetAbi": "12.0.0.0",
