@@ -8,12 +8,12 @@
     "description": "Security and HTTP streaming improvements. Independent preview update channel.",
     "versions": [
       {
-        "version": "0.26.17.1009",
+        "version": "0.26.17.1011",
         "targetAbi": "12.0.0.0",
-        "checksum": "2d2bc62ddce62d46e2f8b7078bf8dc95",
-        "sourceUrl": "https://github.com/gianlucaalfa/Gelato/releases/download/hardening-v0.26.17.1009/gelato_0.26.17.1009.zip",
-        "timestamp": "2026-09-13T22:17:01Z",
-        "changelog": "Hardening preview from commit bd9ad1be86820b5a43ef3661d53193250d9e7602. Regression tests passed before publication."
+        "checksum": "ad29088c59a4663fa1243d69ff7fae12",
+        "sourceUrl": "https://github.com/gianlucaalfa/Gelato/releases/download/hardening-v0.26.17.1011/gelato_0.26.17.1011.zip",
+        "timestamp": "2026-09-13T22:19:31Z",
+        "changelog": "Hardening preview from commit 171e61abc8bb665883c215fe87acd8b50ede1b8b. Regression tests passed before publication."
       }
     ]
   }
