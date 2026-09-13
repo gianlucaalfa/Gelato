@@ -1,4 +1,5 @@
 using System.Text.Json.Serialization;
+using System.ComponentModel.DataAnnotations;
 using System.Xml.Serialization;
 using MediaBrowser.Controller.Entities;
 using MediaBrowser.Model.Plugins;
@@ -195,7 +196,10 @@ public class CatalogConfig
     public bool Enabled { get; set; } = false;
 
     /// <summary>0 means "use global CatalogMaxItems".</summary>
+    [Range(0, 10000)]
     public int MaxItems { get; set; } = 0;
+
+    public int EffectiveMaxItems(int globalLimit) => Math.Clamp(MaxItems > 0 ? MaxItems : globalLimit, 1, 10000);
     public bool CreateCollection { get; set; } = false;
     public string Url { get; set; } = "";
 }

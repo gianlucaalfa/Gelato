@@ -61,9 +61,13 @@ public class GelatoStremioProvider(
     private async Task<T?> GetJsonAsync<T>(string url, CancellationToken ct = default)
     {
         // Addon paths and query strings can contain access tokens. Never log the complete URL.
+        using var timeout = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        timeout.CancelAfter(TimeSpan.FromSeconds(30));
+        ct = timeout.Token;
         using var client = NewClient();
         using var response = await client.GetAsync(url, HttpCompletionOption.ResponseHeadersRead, ct).ConfigureAwait(false);
         response.EnsureSuccessStatusCode();
+        await response.Content.LoadIntoBufferAsync(16 * 1024 * 1024, ct).ConfigureAwait(false);
         await using var stream = await response.Content.ReadAsStreamAsync(ct).ConfigureAwait(false);
         return await JsonSerializer.DeserializeAsync<T>(stream, JsonOpts, ct).ConfigureAwait(false);
     }
@@ -122,6 +126,7 @@ public class GelatoStremioProvider(
             }
             return m;
         }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }
         catch (Exception ex)
         {
             log.LogWarning(ex, "GetManifestAsync: cannot fetch manifest");
@@ -259,7 +264,7 @@ public class GelatoStremioProvider(
     {
         var url = BuildUrl(["subtitles", mediaType.ToString().ToLower(), id]);
         var r = await GetJsonAsync<StremioSubtitleResponse>(url, ct);
-        return r?.Subtitles ?? [];
+        return r.Subtitles ?? [];
     }
 
     public async Task<IReadOnlyList<StremioMeta>> GetCatalogMetasAsync(
@@ -841,7 +846,8 @@ public class StremioStream
         if (!Uri.TryCreate(Url, UriKind.Absolute, out var uri))
             return false;
 
-        return !(uri.PathAndQuery == "/" || string.IsNullOrEmpty(uri.PathAndQuery));
+        // Only HTTP(S) streams may reach Jellyfin/FFmpeg. Local AIOStreams endpoints remain supported.
+        return uri.Scheme == Uri.UriSchemeHttp || uri.Scheme == Uri.UriSchemeHttps;
     }
 
     public bool IsFile()

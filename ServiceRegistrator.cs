@@ -1,4 +1,6 @@
 using Gelato.Config;
+using MediaBrowser.Common.Configuration;
+using Microsoft.AspNetCore.DataProtection;
 using Gelato.Decorators;
 using Gelato.Filters;
 using Gelato.Providers;
@@ -28,6 +30,10 @@ public class ServiceRegistrator : IPluginServiceRegistrator
 {
     public void RegisterServices(IServiceCollection services, IServerApplicationHost host)
     {
+        // Configured addon paths can contain credentials; suppress HttpClient URL logging.
+        services.AddHttpClient(nameof(GelatoStremioProvider)).RemoveAllLoggers();
+        services.AddHttpClient(nameof(SubtitleProvider)).RemoveAllLoggers();
+        services.AddHttpClient(nameof(HttpStreamDownloadResult)).RemoveAllLoggers();
         services.AddSingleton<InsertActionFilter>();
         services.AddSingleton<SearchActionFilter>();
         services.AddSingleton<PlaybackInfoFilter>();
@@ -48,9 +54,20 @@ public class ServiceRegistrator : IPluginServiceRegistrator
         services.AddSingleton(sp => new Lazy<GelatoManager>(sp.GetRequiredService<GelatoManager>));
         services.AddSingleton<CatalogService>();
         services.AddSingleton<CatalogImportService>();
+        services.AddSingleton<CatalogImportQueue>();
+        services.AddSingleton<IHostedService>(sp => sp.GetRequiredService<CatalogImportQueue>());
         services.AddDataProtection();
         services.AddSingleton<RegistrationRequestLimiter>();
-        services.AddSingleton<PalcoCacheService>();
+        services.AddSingleton<PalcoCacheService>(sp =>
+        {
+            var paths = sp.GetRequiredService<IApplicationPaths>();
+            var keys = new DirectoryInfo(Path.Combine(paths.DataPath, "Gelato", "keys"));
+            keys.Create();
+            if (!OperatingSystem.IsWindows())
+                File.SetUnixFileMode(keys.FullName, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
+            return new PalcoCacheService(paths, sp.GetRequiredService<ILogger<PalcoCacheService>>(),
+                DataProtectionProvider.Create(keys));
+        });
         services.AddSingleton<IHostedService, GelatoJavaScriptRegistrationService>();
         services.AddSingleton<IHostedService, UpgradeRepairService>();
         services.AddSingleton<IHostedService, StreamUserDataSync>();

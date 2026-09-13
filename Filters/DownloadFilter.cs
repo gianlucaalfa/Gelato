@@ -44,50 +44,24 @@ public sealed class DownloadFilter(
 
             if (item != null && manager.IsStremio(item))
             {
+                // Both the requested item and selected version must be visible to this user.
+                if (library.GetItemById<Video>(guid, user) is not { } requested
+                    || (item.IsStream() && (!(item.GelatoData<List<Guid>>("userIds")?.Contains(user.Id) ?? false)
+                        || (item.Id != guid && item.PrimaryVersionId != (requested.PrimaryVersionId ?? requested.Id)))))
+                {
+                    ctx.Result = new NotFoundResult();
+                    return;
+                }
                 var path = item.Path;
-
-                // some clients do not send mediasource id. the use the itemid in the query
                 if (!hasMediaSourceId || !item.IsStream())
+                    path = mediaSourceManager.GetStaticMediaSources(item, true, user).FirstOrDefault()?.Path;
+                if (!Uri.TryCreate(path, UriKind.Absolute, out var target)
+                    || (target.Scheme != Uri.UriSchemeHttp && target.Scheme != Uri.UriSchemeHttps))
                 {
-                    path = mediaSourceManager.GetStaticMediaSources(item, true, user)[0].Path;
+                    ctx.Result = new NotFoundResult();
+                    return;
                 }
-
-                var client = httpClientFactory.CreateClient();
-
-                var resp = await client.GetAsync(
-                    path,
-                    HttpCompletionOption.ResponseHeadersRead,
-                    ctx.HttpContext.RequestAborted
-                );
-
-                resp.EnsureSuccessStatusCode();
-
-                ctx.HttpContext.Response.RegisterForDispose(resp);
-
-                var stream = await resp.Content.ReadAsStreamAsync(ctx.HttpContext.RequestAborted);
-
-                var contentType =
-                    resp.Content.Headers.ContentType?.ToString() ?? "application/octet-stream";
-
-                var fileName = resp.Content.Headers.ContentDisposition?.FileName?.Trim('"');
-                if (string.IsNullOrWhiteSpace(fileName))
-                {
-                    var uri = new Uri(path);
-                    fileName = Path.GetFileName(uri.AbsolutePath);
-                    if (string.IsNullOrWhiteSpace(fileName))
-                        fileName = "download";
-                }
-
-                if (resp.Content.Headers.ContentLength is { } len)
-                {
-                    ctx.HttpContext.Response.ContentLength = len;
-                }
-
-                ctx.Result = new FileStreamResult(stream, contentType)
-                {
-                    FileDownloadName = fileName,
-                    EnableRangeProcessing = true,
-                };
+                ctx.Result = new HttpStreamDownloadResult(httpClientFactory, target);
                 return;
             }
         }

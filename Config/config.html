@@ -69,6 +69,11 @@
             </div>
        
 
+              <div class="checkboxContainer checkboxContainer-withDescription">
+                <label><input is="emby-checkbox" type="checkbox" id="chkPalcoEnabled" /><span>Enable Palco integration</span></label>
+                <div class="fieldDescription">Enable the optional Anfiteatro registration and cache API. Administration requires an administrator account.</div>
+              </div>
+
             <div class="checkboxContainer checkboxContainer-withDescription">
               <label>
                 <input is="emby-checkbox" type="checkbox" id="chkLazyImages" />
@@ -298,6 +303,7 @@
         const txtBufferDays = page.querySelector('#txtBufferDays');
         const txtFFmpegAnalyzeDuration = page.querySelector('#txtFFmpegAnalyzeDuration');
         const txtFFmpegProbeSize = page.querySelector('#txtFFmpegProbeSize');
+        const chkPalcoEnabled = page.querySelector('#chkPalcoEnabled');
         const chkEnableJavaScriptInjection = page.querySelector('#chkEnableJavaScriptInjection');
         const chkLazyImages = page.querySelector('#chkLazyImages');
 
@@ -592,6 +598,7 @@
             if (txtBufferDays) txtBufferDays.value = cfg.FilterUnreleasedBufferDays ?? 0;
             if (txtFFmpegAnalyzeDuration) txtFFmpegAnalyzeDuration.value = cfg.FFmpegAnalyzeDuration || "5M";
             if (txtFFmpegProbeSize) txtFFmpegProbeSize.value = cfg.FFmpegProbeSize || "25M";
+            chkPalcoEnabled.checked = cfg.PalcoEnabled !== false;
             if (chkEnableJavaScriptInjection) chkEnableJavaScriptInjection.checked = cfg.EnableJavaScriptInjection || false;
             if (chkLazyImages) chkLazyImages.checked = cfg.LazyImages ?? false;
 
@@ -627,6 +634,7 @@
 
             cfg.FFmpegAnalyzeDuration = txtFFmpegAnalyzeDuration.value;
             cfg.FFmpegProbeSize = txtFFmpegProbeSize.value;
+            cfg.PalcoEnabled = chkPalcoEnabled.checked;
             cfg.EnableJavaScriptInjection = chkEnableJavaScriptInjection.checked;
             cfg.LazyImages = chkLazyImages.checked;
 

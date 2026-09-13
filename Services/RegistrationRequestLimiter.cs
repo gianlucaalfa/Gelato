@@ -1,5 +1,3 @@
-using System.Text.Json;
-
 namespace Gelato.Services;
 
 /// <summary>Bounds anonymous registration work without requiring host middleware changes.</summary>
@@ -11,7 +9,7 @@ public sealed class RegistrationRequestLimiter
     private int _total;
 
     public static bool IsRegistrationEnabled(string? value) =>
-        string.IsNullOrEmpty(value) || string.Equals(value.Trim(), "true", StringComparison.Ordinal);
+        string.Equals(value?.Trim(), "true", StringComparison.Ordinal);
 
     public bool TryAcquire(string client)
     {
@@ -25,7 +23,7 @@ public sealed class RegistrationRequestLimiter
                 foreach (var key in _clients.Where(x => now - x.Value.Start >= TimeSpan.FromMinutes(10)).Select(x => x.Key).ToArray())
                     _clients.Remove(key);
             }
-            var entry = _clients.GetValueOrDefault(client, (now, 0));
+            var entry = _clients.GetValueOrDefault(client, (Start: now, Count: 0));
             if (_total >= 30 || entry.Count >= 5)
                 return false;
             _clients[client] = (entry.Start, entry.Count + 1);

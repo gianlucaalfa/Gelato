@@ -268,7 +268,21 @@ public sealed class GelatoManager(
     /// <summary>
     /// Inserts metadata into the library. Skip if it already exists.
     /// </summary>
-    public async Task<(BaseItem? Item, bool Created)> InsertMeta(
+    private readonly KeyLock _metadataWrites = new();
+
+    public Task<(BaseItem? Item, bool Created)> InsertMeta(
+        Folder parent,
+        StremioMeta meta,
+        User? user,
+        bool allowRemoteRefresh,
+        bool refreshItem,
+        bool queueRefreshItem,
+        CancellationToken ct
+    )
+        => _metadataWrites.RunQueuedAsync(new StremioUri(meta.Type, meta.ImdbId ?? meta.Id).ToGuid(),
+            token => InsertMetaCore(parent, meta, user, allowRemoteRefresh, refreshItem, queueRefreshItem, token), ct);
+
+    private async Task<(BaseItem? Item, bool Created)> InsertMetaCore(
         Folder parent,
         StremioMeta meta,
         User? user,
@@ -489,7 +503,7 @@ public sealed class GelatoManager(
         }
 
         var isEpisode = video is Episode;
-        var parent = isEpisode ? video.GetParent() as Folder : TryGetMovieFolder(userId);
+        var parent = video.GetParent() as Folder ?? (isEpisode ? null : TryGetMovieFolder(userId));
         if (parent is null)
         {
             _log.LogWarning("SyncStreams: no parent, skipping");
@@ -512,6 +526,7 @@ public sealed class GelatoManager(
 
         var cfg = GelatoPlugin.Instance!.GetConfig(userId);
         var stremio = cfg.Stremio;
+        if (stremio is null) return 0;
         var streams = await stremio.GetStreamsAsync(uri, ct).ConfigureAwait(false);
         var httpPort = GetHttpPort();
 

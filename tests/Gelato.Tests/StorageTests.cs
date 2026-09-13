@@ -11,12 +11,22 @@ namespace Gelato.Tests;
 
 public class StorageTests : IDisposable
 {
+    static StorageTests() => SQLitePCL.raw.SetProvider(new SQLitePCL.SQLite3Provider_sqlite3());
+
     private readonly string _path = Path.Combine(Path.GetTempPath(), "gelato-tests-" + Guid.NewGuid());
     private PalcoCacheService Create()
     {
         var paths = new Mock<IApplicationPaths>();
         paths.SetupGet(x => x.DataPath).Returns(_path);
-        return new(paths.Object, NullLogger<PalcoCacheService>.Instance, new EphemeralDataProtectionProvider());
+        return new(paths.Object, NullLogger<PalcoCacheService>.Instance, DataProtectionProvider.Create(new DirectoryInfo(Path.Combine(_path, "keys"))));
+    }
+
+    [Fact]
+    public void SmtpSettingsSurviveServiceRestart()
+    {
+        using (var cache = Create()) cache.Set("smtp-config", "secret", ns: "anfiteatro-registration");
+        using var reopened = Create();
+        Assert.Equal("secret", reopened.Get("smtp-config", "anfiteatro-registration"));
     }
 
     [Fact]

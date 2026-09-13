@@ -126,7 +126,9 @@ public class PalcoCacheController(ILogger<PalcoCacheController> logger, Registra
                         };
                         mail.To.Add(adminEmail);
 
-                        await client.SendMailAsync(mail, HttpContext.RequestAborted);
+                        using var timeout = CancellationTokenSource.CreateLinkedTokenSource(HttpContext.RequestAborted);
+                        timeout.CancelAfter(TimeSpan.FromSeconds(30));
+                        await client.SendMailAsync(mail, timeout.Token);
                         logger.LogInformation(
                             "[Gelato] Palco Admin notification sent to {AdminEmail} for registration: {Id}",
                             adminEmail,
@@ -150,7 +152,7 @@ public class PalcoCacheController(ILogger<PalcoCacheController> logger, Registra
     /// Get a cached value.
     /// </summary>
     [HttpGet("Cache/{key}")]
-    public ActionResult Get([FromRoute] string key, [FromQuery] string ns = "")
+    public ActionResult Get([FromRoute, StringLength(256)] string key, [FromQuery, StringLength(128)] string ns = "")
     {
         if (Cache == null)
             return StatusCode(503);
@@ -173,9 +175,9 @@ public class PalcoCacheController(ILogger<PalcoCacheController> logger, Registra
     [HttpPost("Cache/{key}")]
     [Consumes(MediaTypeNames.Application.Json)]
     public ActionResult Set(
-        [FromRoute] string key,
+        [FromRoute, StringLength(256)] string key,
         [FromBody] SetRequest request,
-        [FromQuery] string ns = ""
+        [FromQuery, StringLength(128)] string ns = ""
     )
     {
         if (Cache == null)
@@ -189,7 +191,7 @@ public class PalcoCacheController(ILogger<PalcoCacheController> logger, Registra
     /// Delete a cached value.
     /// </summary>
     [HttpDelete("Cache/{key}")]
-    public ActionResult Delete([FromRoute] string key, [FromQuery] string ns = "")
+    public ActionResult Delete([FromRoute, StringLength(256)] string key, [FromQuery, StringLength(128)] string ns = "")
     {
         if (Cache == null)
             return StatusCode(503);
@@ -211,13 +213,13 @@ public class PalcoCacheController(ILogger<PalcoCacheController> logger, Registra
     [Consumes(MediaTypeNames.Application.Json)]
     public ActionResult<Dictionary<string, string>> GetBulk(
         [FromBody] BulkRequest request,
-        [FromQuery] string ns = ""
+        [FromQuery, StringLength(128)] string ns = ""
     )
     {
         if (Cache == null)
             return StatusCode(503);
         var keys = request.Keys.Take(201).ToArray();
-        if (keys.Length > 200)
+        if (keys.Length > 200 || keys.Any(key => string.IsNullOrEmpty(key) || key.Length > 256))
             return BadRequest("At most 200 keys are allowed");
         return Ok(Cache.GetBulk(keys, ns));
     }
@@ -264,7 +266,9 @@ public class PalcoCacheController(ILogger<PalcoCacheController> logger, Registra
             };
             mail.To.Add(request.To);
 
-            await client.SendMailAsync(mail, HttpContext.RequestAborted);
+            using var timeout = CancellationTokenSource.CreateLinkedTokenSource(HttpContext.RequestAborted);
+                        timeout.CancelAfter(TimeSpan.FromSeconds(30));
+                        await client.SendMailAsync(mail, timeout.Token);
             logger.LogInformation("[Gelato] Palco Email sent to {To}", request.To);
             return Ok(new { success = true });
         }

@@ -51,8 +51,10 @@ public sealed class GelatoApiController : ControllerBase
         [FromRoute, Required] string id
     )
     {
-        var cfg = GelatoPlugin.Instance!.GetConfig(Guid.Empty);
-        var meta = await cfg.Stremio.GetMetaAsync(id, stremioMetaType);
+        if (!HttpContext.TryGetUserId(out var userId)) return Unauthorized();
+        var cfg = GelatoPlugin.Instance!.GetConfig(userId);
+        if (cfg.Stremio is null) return NotFound();
+        var meta = await cfg.Stremio.GetMetaAsync(id, stremioMetaType, ct: HttpContext.RequestAborted);
         if (meta is null)
         {
             return NotFound();

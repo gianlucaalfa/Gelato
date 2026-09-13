@@ -1,3 +1,4 @@
+using Gelato.Providers;
 using Jellyfin.Database.Implementations.Entities;
 using MediaBrowser.Controller.Entities;
 using MediaBrowser.Controller.Library;
@@ -8,7 +9,7 @@ namespace Gelato.Services;
 
 /// <summary>Prepares user-specific streams asynchronously before DTO generation or playback.</summary>
 public sealed class StreamSyncService(Lazy<GelatoManager> manager, ILibraryManager library,
-    IHostApplicationLifetime lifetime, ILogger<StreamSyncService> log)
+    IHostApplicationLifetime lifetime, ILogger<StreamSyncService> log, Lazy<SubtitleProvider> subtitles)
 {
     private readonly KeyLock _requests = new();
 
@@ -28,7 +29,9 @@ public sealed class StreamSyncService(Lazy<GelatoManager> manager, ILibraryManag
             if (manager.Value.HasStreamSync(key)) return;
             try
             {
-                var count = await manager.Value.SyncStreams(item, user.Id, token).ConfigureAwait(false);
+                var streamTask = manager.Value.SyncStreams(item, user.Id, token);
+                await Task.WhenAll(streamTask, PrewarmSubtitlesAsync(item, token)).ConfigureAwait(false);
+                var count = await streamTask.ConfigureAwait(false);
                 manager.Value.SetStreamSync(key, count == 0 ? TimeSpan.FromSeconds(30) : null);
             }
             catch (OperationCanceledException) when (token.IsCancellationRequested) { throw; }
@@ -39,5 +42,15 @@ public sealed class StreamSyncService(Lazy<GelatoManager> manager, ILibraryManag
             }
         }, lifetime.ApplicationStopping);
         await work.WaitAsync(ct).ConfigureAwait(false);
+    }
+    private async Task PrewarmSubtitlesAsync(BaseItem item, CancellationToken ct)
+    {
+        var options = library.GetLibraryOptions(item);
+        if (options.SubtitleDownloadLanguages?.Length is not > 0
+            || options.DisabledSubtitleFetchers.Contains("Gelato Subtitles", StringComparer.OrdinalIgnoreCase)
+            || StremioUri.FromBaseItem(item) is not { } uri) return;
+        try { await subtitles.Value.GetSubtitlesAsync(uri.ExternalId, uri.MediaType, ct).ConfigureAwait(false); }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }
+        catch (Exception ex) { log.LogDebug(ex, "Subtitle prewarm failed for item {ItemId}", item.Id); }
     }
 }

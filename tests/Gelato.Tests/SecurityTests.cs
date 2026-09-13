@@ -24,7 +24,7 @@ public class SecurityTests
     [InlineData("false", false)]
     [InlineData("invalid", false)]
     [InlineData("true", true)]
-    [InlineData(null, true)]
+    [InlineData(null, false)]
     public void RegistrationFlagFailsClosedOnInvalidData(string? value, bool enabled) =>
         Assert.Equal(enabled, RegistrationRequestLimiter.IsRegistrationEnabled(value));
 
