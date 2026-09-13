@@ -22,6 +22,8 @@ jobs:
           dotnet-version: '10.0.x'
       - name: Build plugin and run regression tests
         run: dotnet test tests/Gelato.Tests/Gelato.Tests.csproj --configuration Release -p:PreserveTestDependencies=true --logger "trx;LogFileName=regression.trx"
+      - name: Verify source formatting before publication
+        run: dotnet format Gelato.sln --verify-no-changes --no-restore
       - name: Upload test results
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02

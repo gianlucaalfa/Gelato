@@ -253,13 +253,15 @@ public sealed class MediaSourceManagerDecorator(
     /// The stream rows linked to a movie/episode as its versions. Read from the database: the
     /// instance at hand may be a copy whose links are out of date.
     /// </summary>
-    private List<Video> GetStreamRows(Video? primary) =>
-        primary is null
+    private List<Video> GetStreamRows(Video? primary)
+    {
+        if (primary?.PrimaryVersionId is { } ownerId)
+            primary = _libraryManager.GetItemById(ownerId) as Video;
+        return primary is null
             ? []
-            : _libraryManager
-                .GetLinkedAlternateVersions(primary)
-                .Where(v => v.HasStreamTag())
-                .ToList();
+            : _libraryManager.GetLinkedAlternateVersions(primary)
+                .Where(version => version.HasStreamTag()).ToList();
+    }
 
     private static HashSet<string> GetStreamRowIds(IEnumerable<Video> rows) =>
         rows.Select(r => r.Id.ToString("N", CultureInfo.InvariantCulture)).ToHashSet();
@@ -440,7 +442,7 @@ public sealed class MediaSourceManagerDecorator(
 
         // Stub path after probing is done so the real URL is never sent to clients.
         // Force File protocol so clients proxy through Jellyfin instead of direct-playing.
-        if (ctx.GetActionName() == "GetPostedPlaybackInfo")
+        if (ctx?.GetActionName() == "GetPostedPlaybackInfo")
         {
             selected.Path = "/stub";
             selected.IsRemote = false;

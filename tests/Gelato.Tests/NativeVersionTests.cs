@@ -69,4 +69,21 @@ public class NativeVersionTests
         Assert.Equal(visible.Id, result[0].Id);
         Assert.Equal(2, result[0].MediaSourceCount);
     }
+    [Fact]
+    public void SourceCountPreservesManuallyMergedLocalVersions()
+    {
+        var primary = new Movie { Id = Guid.NewGuid(), Path = "/media/movie.mkv" };
+        var local = new Movie { Id = Guid.NewGuid(), Path = "/media/extended.mkv" };
+        var row = new Movie { Id = Guid.NewGuid(), Tags = [GelatoManager.StreamTag] };
+        var dto = new BaseItemDto { Id = primary.Id, MediaSourceCount = 3 };
+        var options = new DtoOptions(false);
+        var inner = new Mock<IDtoService>();
+        inner.Setup(x => x.GetBaseItemDto(primary, options, null, null)).Returns(dto);
+        var library = new Mock<ILibraryManager>();
+        library.Setup(x => x.GetLinkedAlternateVersions(primary)).Returns(new Video[] { local, row });
+        var decorated = new DtoServiceDecorator(inner.Object, new Lazy<GelatoManager>(() => null!),
+            new HttpContextAccessor(), library.Object, Mock.Of<IUserDataManager>());
+        Assert.Equal(2, decorated.GetBaseItemDto(primary, options).MediaSourceCount);
+    }
+
 }
