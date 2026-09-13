@@ -1,4 +1,5 @@
 using Gelato.Config;
+using MediaBrowser.Common.Api;
 using Gelato.ScheduledTasks;
 using Gelato.Services;
 using MediaBrowser.Controller.Library;
@@ -11,7 +12,7 @@ namespace Gelato.Controllers;
 
 [ApiController]
 [Route("gelato/catalogs")]
-[Authorize]
+[Authorize(Policy = Policies.RequiresElevation)]
 public class CatalogController(
     ILogger<CatalogController> logger,
     CatalogService catalogService,

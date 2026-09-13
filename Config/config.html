@@ -419,7 +419,7 @@
             // Type
             const typeCell = document.createElement('td');
             typeCell.style.padding = '10px';
-            typeCell.innerHTML = '<span style="padding: 2px 6px; border-radius: 4px; background: rgba(255,255,255,0.1); font-size: 0.9em;">' + cat.Type + '</span>';
+            typeCell.textContent = cat.Type;
             row.appendChild(typeCell);
 
             // Enabled

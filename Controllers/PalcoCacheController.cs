@@ -4,6 +4,7 @@ using System.Net.Mail;
 using System.Net.Mime;
 using System.Text.Json;
 using Gelato.Services;
+using MediaBrowser.Common.Api;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.Extensions.Logging;
@@ -16,8 +17,8 @@ namespace Gelato.Controllers;
 /// </summary>
 [ApiController]
 [Route("Palco")]
-[Authorize]
-public class PalcoCacheController(ILogger<PalcoCacheController> logger) : ControllerBase
+[Authorize(Policy = Policies.RequiresElevation)]
+public class PalcoCacheController(ILogger<PalcoCacheController> logger, RegistrationRequestLimiter limiter) : ControllerBase
 {
     private const string RegistrationNs = "anfiteatro-registration";
 
@@ -34,7 +35,7 @@ public class PalcoCacheController(ILogger<PalcoCacheController> logger) : Contro
     public ActionResult GetRegistrationEnabled()
     {
         var value = Cache?.Get("registration-enabled", RegistrationNs);
-        var enabled = string.IsNullOrEmpty(value) || JsonSerializer.Deserialize<bool>(value);
+        var enabled = RegistrationRequestLimiter.IsRegistrationEnabled(value);
         return Ok(new { enabled });
     }
 
@@ -44,32 +45,33 @@ public class PalcoCacheController(ILogger<PalcoCacheController> logger) : Contro
     [HttpPost("Registration/Request")]
     [AllowAnonymous]
     [Consumes(MediaTypeNames.Application.Json)]
+    [RequestSizeLimit(32768)]
     public async Task<ActionResult> SubmitRegistrationRequest(
         [FromBody] RegistrationRequest request
     )
     {
         if (Cache == null)
             return StatusCode(503, new { error = "Cache unavailable" });
-        if (string.IsNullOrEmpty(request.Id) || !request.Id.StartsWith("request-"))
+        var enabledJson = Cache.Get("registration-enabled", RegistrationNs);
+        if (!RegistrationRequestLimiter.IsRegistrationEnabled(enabledJson))
+            return StatusCode(403, new { error = "Registration is disabled" });
+        if (!limiter.TryAcquire(HttpContext.Connection.RemoteIpAddress?.ToString() ?? "unknown"))
+            return StatusCode(429, new { error = "Too many registration requests" });
+        if (!System.Text.RegularExpressions.Regex.IsMatch(request.Id, @"^request-[A-Za-z0-9_-]{1,120}$"))
             return BadRequest(new { error = "Invalid request ID" });
-
-        // Store request
-        Cache.Set(request.Id, request.Data, request.TtlSeconds, RegistrationNs);
-        logger.LogInformation("[Gelato] Palco Registration request received: {Id}", request.Id);
-
-        // Update request index for listing
-        var indexJson = Cache.Get("requests-index", RegistrationNs);
-        var index = string.IsNullOrEmpty(indexJson)
-            ? []
-            : JsonSerializer.Deserialize<List<string>>(indexJson) ?? [];
-
-        var requestId = request.Id.Replace("request-", "");
-        if (!index.Contains(requestId))
+        try
         {
-            index.Add(requestId);
-            Cache.Set("requests-index", JsonSerializer.Serialize(index), 0, RegistrationNs);
-            logger.LogInformation("[Gelato] Palco Request added to index: {Id}", requestId);
+            using var data = JsonDocument.Parse(request.Data);
+            if (data.RootElement.ValueKind != JsonValueKind.Object)
+                return BadRequest(new { error = "Registration data must be an object" });
         }
+        catch (JsonException)
+        {
+            return BadRequest(new { error = "Invalid registration data" });
+        }
+        var requestId = request.Id["request-".Length..];
+        if (!Cache.TryAddRegistrationRequest(request.Id, request.Data, request.TtlSeconds))
+            return Conflict(new { error = "Request already exists or the request queue is full" });
 
         // Notify admin via email if SMTP is configured
         try
@@ -112,7 +114,7 @@ public class PalcoCacheController(ILogger<PalcoCacheController> logger) : Contro
 
                         body += "\n\nPlease review this request in the Anfiteatro admin panel.";
 
-                        var mail = new MailMessage
+                        using var mail = new MailMessage
                         {
                             From = new MailAddress(
                                 smtp.FromAddress ?? smtp.Username,
@@ -123,7 +125,7 @@ public class PalcoCacheController(ILogger<PalcoCacheController> logger) : Contro
                         };
                         mail.To.Add(adminEmail);
 
-                        await client.SendMailAsync(mail);
+                        await client.SendMailAsync(mail, HttpContext.RequestAborted);
                         logger.LogInformation(
                             "[Gelato] Palco Admin notification sent to {AdminEmail} for registration: {Id}",
                             adminEmail,
@@ -192,25 +194,6 @@ public class PalcoCacheController(ILogger<PalcoCacheController> logger) : Contro
             return StatusCode(503);
         var deleted = Cache.Delete(key, ns);
 
-        // If deleting a request, also remove from index
-        if (key.StartsWith("request-") && ns == RegistrationNs)
-        {
-            var requestId = key.Replace("request-", "");
-            var indexJson = Cache.Get("requests-index", RegistrationNs);
-            if (!string.IsNullOrEmpty(indexJson))
-            {
-                var index = JsonSerializer.Deserialize<List<string>>(indexJson) ?? [];
-                if (index.Remove(requestId))
-                {
-                    Cache.Set("requests-index", JsonSerializer.Serialize(index), 0, RegistrationNs);
-                    logger.LogInformation(
-                        "[Gelato] Palco Request removed from index: {Id}",
-                        requestId
-                    );
-                }
-            }
-        }
-
         logger.LogInformation(
             "[Gelato] Palco Deleted: {Key} from {Ns}, success={Deleted}",
             key,
@@ -232,7 +215,10 @@ public class PalcoCacheController(ILogger<PalcoCacheController> logger) : Contro
     {
         if (Cache == null)
             return StatusCode(503);
-        return Ok(Cache.GetBulk(request.Keys, ns));
+        var keys = request.Keys.Take(201).ToArray();
+        if (keys.Length > 200)
+            return BadRequest("At most 200 keys are allowed");
+        return Ok(Cache.GetBulk(keys, ns));
     }
 
     /// <summary>
@@ -267,7 +253,7 @@ public class PalcoCacheController(ILogger<PalcoCacheController> logger) : Contro
             client.EnableSsl = true;
             client.Credentials = new NetworkCredential(request.SmtpUsername, request.SmtpPassword);
 
-            var mail = new MailMessage
+            using var mail = new MailMessage
             {
                 From = new MailAddress(request.FromAddress, request.FromName),
                 Subject = request.Subject,
@@ -276,7 +262,7 @@ public class PalcoCacheController(ILogger<PalcoCacheController> logger) : Contro
             };
             mail.To.Add(request.To);
 
-            await client.SendMailAsync(mail);
+            await client.SendMailAsync(mail, HttpContext.RequestAborted);
             logger.LogInformation("[Gelato] Palco Email sent to {To}", request.To);
             return Ok(new { success = true });
         }
@@ -292,18 +278,19 @@ public class PalcoCacheController(ILogger<PalcoCacheController> logger) : Contro
 
 public class RegistrationRequest
 {
-    [Required]
+    [Required, StringLength(128)]
     public required string Id { get; set; }
 
-    [Required]
+    [Required, StringLength(16384)]
     public required string Data { get; set; }
     public int TtlSeconds { get; set; } = 2592000; // 30 days
 }
 
 public class SetRequest
 {
-    [Required]
+    [Required, StringLength(262144)]
     public required string Value { get; set; }
+    [Range(0, 31536000)]
     public int TtlSeconds { get; set; } = 0;
 }
 
