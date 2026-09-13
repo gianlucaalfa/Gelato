@@ -39,55 +39,25 @@ public sealed class DeleteResourceFilter(
             return;
         }
 
-        // Handle deletion and return 204 No Content
-        await manager.RunStreamMutationAsync((item as Video)?.PrimaryVersionId ?? item.Id, _ =>
+        var owner = (item as Video)?.PrimaryVersionId ?? item.Id;
+        await manager.RunStreamMutationAsync(owner, _ =>
         {
-            DeleteItem(item, user);
-            return Task.CompletedTask;
-        }, ctx.HttpContext.RequestAborted);
-        ctx.Result = new NoContentResult();
-    }
-
-    private void DeleteItem(BaseItem item, Jellyfin.Database.Implementations.Entities.User user)
-    {
-        if (item.IsPrimaryVersion())
-        {
-            DeleteStreams(item, user);
-        }
-        else
-        {
-            log.LogInformation("Deleting {Name}", item.Name);
-            library.DeleteItem(item, new DeleteOptions { DeleteFileLocation = false }, true);
-        }
-    }
-
-    private void DeleteStreams(BaseItem item, Jellyfin.Database.Implementations.Entities.User user)
-    {
-        var query = new InternalItemsQuery
-        {
-            IncludeItemTypes = [item.GetBaseItemKind()],
-            HasAnyProviderId = new Dictionary<string, string>
+            // Recheck inside the lock: a queued deletion may already have removed the item.
+            var current = library.GetItemById<BaseItem>(guid, user);
+            if (current is null || !manager.CanDelete(current, user)) return Task.CompletedTask;
+            if (current is Video video && current.IsPrimaryVersion())
             {
-                { "Stremio", item.ProviderIds["Stremio"] },
-            },
-            Recursive = false,
-            ParentId = item.ParentId,
-            IncludeOwnedItems = true,
-            GroupByPresentationUniqueKey = false,
-            GroupBySeriesPresentationUniqueKey = false,
-            CollapseBoxSetItems = false,
-            // Skip filter
-            IsDeadPerson = true,
-        };
-
-        var sources = library.GetItemList(query).Where(alt =>
-            (alt.Id == item.Id || (alt.HasStreamTag() && alt is Video version
-                && (version.PrimaryVersionId is null || version.PrimaryVersionId == item.Id)))
-            && manager.CanDelete(alt, user)).ToList();
-        foreach (var alt in sources)
-        {
-            log.LogInformation("Deleting {Name} ({Id})", alt.Name, alt.Id);
-            library.DeleteItem(alt, new DeleteOptions { DeleteFileLocation = false }, true);
-        }
+                manager.DeleteOwnedStreamRows(video);
+            }
+            else if (current is Video row && current.HasStreamTag())
+            {
+                manager.UnlinkStreamRow(row);
+            }
+            log.LogInformation("Deleting {Name} ({Id})", current.Name, current.Id);
+            library.DeleteItem(current, new DeleteOptions { DeleteFileLocation = false }, true);
+            manager.ClearCache();
+            return Task.CompletedTask;
+        }, ctx.HttpContext.RequestAborted).ConfigureAwait(false);
+        ctx.Result = new NoContentResult();
     }
 }

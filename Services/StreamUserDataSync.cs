@@ -12,9 +12,11 @@ namespace Gelato.Services;
 /// <remarks>
 /// Jellyfin 12 keeps a resume point on the version that was played, because local versions can be
 /// different cuts. A movie's streams are the same film from different sources, and the list
-/// changes between syncs, so the resume point, favourite and rating set on a stream are copied to
-/// the movie. The movie holds the shared state, and DtoServiceDecorator shows it on every version.
-/// Played state needs no copy: Jellyfin marks every version itself.
+/// changes between syncs, so playback of a stream moves the movie's resume point. The movie holds
+/// the shared state, and DtoServiceDecorator shows it on every version. Played state needs no copy:
+/// Jellyfin marks every version itself. Favourites and ratings set on a stream are applied to the
+/// movie by <see cref="Filters.StreamUserDataFilter"/>: the saved event carries the stream's whole
+/// stored state, which is stale apart from the field that was set.
 /// </remarks>
 public sealed class StreamUserDataSync(
     IUserDataManager userDataManager,
@@ -35,13 +37,38 @@ public sealed class StreamUserDataSync(
         return Task.CompletedTask;
     }
 
+    /// <summary>
+    /// How much later than the stream the movie's copy of the last played date is set. The movie
+    /// wins Jellyfin's most-recently-played choice among the versions, and a stream is the more
+    /// recent one only when it was played after the movie by at least this much.
+    /// </summary>
+    public static readonly TimeSpan CopyOffset = TimeSpan.FromTicks(1);
+
+    /// <summary>
+    /// The resume point a stream just gave its movie, for the played-state pass that follows on
+    /// the same thread.
+    /// </summary>
+    [ThreadStatic]
+    private static (Guid UserId, Guid PrimaryId, long Position, DateTime At)? _stopped;
+
     private void OnUserDataSaved(object? sender, UserDataSaveEventArgs e)
     {
+        if (e.SaveReason is UserDataSaveReason.TogglePlayed)
+        {
+            RestoreResumePoint(e);
+            return;
+        }
+
         // Rows being deleted are unlinked first, so clearing their watch state is not copied.
         if (
             e.Item is not Video { PrimaryVersionId: { } primaryId } row
             || !row.HasStreamTag()
-            || e.SaveReason is UserDataSaveReason.TogglePlayed or UserDataSaveReason.Import
+            || e.SaveReason
+                is not (
+                    UserDataSaveReason.PlaybackStart
+                    or UserDataSaveReason.PlaybackProgress
+                    or UserDataSaveReason.PlaybackFinished
+                )
         )
         {
             return;
@@ -59,22 +86,16 @@ public sealed class StreamUserDataSync(
             }
 
             var source = e.UserData;
-            if (e.SaveReason is UserDataSaveReason.UpdateUserRating or UserDataSaveReason.UpdateUserData)
-            {
-                data.IsFavorite = source.IsFavorite;
-                data.Likes = source.Likes;
-                data.Rating = source.Rating;
-            }
+            // One tick after the stream: Jellyfin's resume query keeps one in-progress version per
+            // title and breaks a tie on the item id, so with equal dates Continue Watching showed
+            // the movie for some titles and the stream row for others.
+            data.LastPlayedDate = source.LastPlayedDate + CopyOffset ?? data.LastPlayedDate;
 
-            if (e.SaveReason is not UserDataSaveReason.UpdateUserRating)
+            // A start report sets no position: the stream's stored one is stale, and a stream that
+            // fails before its first progress report would clear the movie's resume point.
+            if (e.SaveReason is not UserDataSaveReason.PlaybackStart)
             {
                 data.PlaybackPositionTicks = source.PlaybackPositionTicks;
-                data.LastPlayedDate = source.LastPlayedDate ?? data.LastPlayedDate;
-                // A finished playback marks every version played through Jellyfin.
-                if (e.SaveReason is UserDataSaveReason.UpdateUserData)
-                {
-                    data.Played = source.Played;
-                }
             }
 
             // Not a playback reason: the movie was not played, and listeners on playback reasons
@@ -83,11 +104,20 @@ public sealed class StreamUserDataSync(
                 user,
                 primary,
                 data,
-                e.SaveReason is UserDataSaveReason.UpdateUserRating
-                    ? UserDataSaveReason.UpdateUserRating
-                    : UserDataSaveReason.UpdateUserData,
+                UserDataSaveReason.UpdateUserData,
                 CancellationToken.None
             );
+
+            // Replaying a watched movie: the stream is watched too, so Jellyfin marks every other
+            // version watched again right after this and resets their resume points, the movie's
+            // included. It does so on every progress report as well as on stop, so the stream's
+            // own point goes back onto the movie after each of them.
+            _stopped =
+                e.SaveReason is not UserDataSaveReason.PlaybackStart
+                && source.Played
+                && source.PlaybackPositionTicks > 0
+                    ? (e.UserId, primaryId, source.PlaybackPositionTicks, DateTime.UtcNow)
+                    : null;
         }
         catch (Exception ex)
         {
@@ -97,6 +127,42 @@ public sealed class StreamUserDataSync(
                 row.Id,
                 primaryId
             );
+        }
+    }
+
+    private void RestoreResumePoint(UserDataSaveEventArgs e)
+    {
+        if (
+            _stopped is not { } stopped
+            || e.Item.Id != stopped.PrimaryId
+            || e.UserId != stopped.UserId
+            || e.UserData is not { Played: true, PlaybackPositionTicks: 0 } data
+        )
+        {
+            return;
+        }
+
+        _stopped = null;
+        if (DateTime.UtcNow - stopped.At > TimeSpan.FromSeconds(5))
+            return;
+
+        try
+        {
+            if (userManager.GetUserById(e.UserId) is not { } user)
+                return;
+
+            data.PlaybackPositionTicks = stopped.Position;
+            userDataManager.SaveUserData(
+                user,
+                e.Item,
+                data,
+                UserDataSaveReason.UpdateUserData,
+                CancellationToken.None
+            );
+        }
+        catch (Exception ex)
+        {
+            log.LogWarning(ex, "Could not keep the resume point of {Id}", e.Item.Id);
         }
     }
 }

@@ -48,6 +48,7 @@ public class ServiceRegistrator : IPluginServiceRegistrator
         services.AddSingleton<TorrentSessionService>();
         services.AddSingleton<IHostedService>(sp => sp.GetRequiredService<TorrentSessionService>());
         services.AddSingleton<StreamPreparationFilter>();
+        services.AddSingleton<StreamUserDataFilter>();
         services.DecorateSingle<IItemRepository, GelatoItemRepository>();
         services.AddSingleton(sp => (GelatoItemRepository)sp.GetRequiredService<IItemRepository>());
         services.DecorateSingle<IItemCountService, ItemCountServiceDecorator>();
@@ -141,6 +142,7 @@ public class ServiceRegistrator : IPluginServiceRegistrator
             o.Filters.AddService<ImageResourceFilter>();
             o.Filters.AddService<DeleteResourceFilter>();
             o.Filters.AddService<DownloadFilter>();
+            o.Filters.AddService<StreamUserDataFilter>();
         });
     }
 

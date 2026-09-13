@@ -41,6 +41,12 @@ Configured addons remain trusted sources of outbound HTTP URLs. Private/LAN endp
 
 The new Jellyfin search interfaces were evaluated against Jellyfin 12 source. Their results refer to persisted item IDs; Gelato currently returns and hydrates external metadata that is not yet in the library. Replacing that adapter requires a separate integration design, so this branch retains the existing search behavior.
 
+## Upstream PR #214 review
+
+Reviewed through `9d2152e8e67cfc8943edd1a32bd8d97bf4bbc468`. The latest watch-state changes are included: playback start does not clear resume, replaying watched content retains progress, and favourite/rating requests update only the requested fields. The request filter additionally rejects unsuccessful results and verifies the target user can access both the row and its primary.
+
+Native links are read from persistence to handle stale cached instances and manually merged local versions. Remote rows receive refresh timestamps, retained legacy rows receive their primary ID, subtitle lookups include native versions, and mixed-mode opt-out removes linked remote sources. Stream discovery retains the asynchronous preparation introduced by this branch. Deletion keeps same-folder legacy lookup and stable per-primary stream IDs instead of adopting cross-library rows or deriving IDs from temporary playback URLs. DTO mapping remains by ID for every patch; season counts retain the separate linked-version correction.
+
 ## Validation and rollback
 
 Automated coverage includes concurrency/cancellation, cache isolation, legacy SQLite migration, SMTP protection and restart, registration limits, HTTP ranges, source URL schemes, metadata identity, import limits, native episode counts and filtered DTO mapping. The real-container test exercises dependency injection and HTTP authorization on the packaged plugin.
