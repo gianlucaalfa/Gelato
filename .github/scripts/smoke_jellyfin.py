@@ -36,12 +36,15 @@ def request(path, method="GET", data=None, token=None, expected=200):
         raise AssertionError(f"{method} {path}: expected {expected}, got {status}")
     return json.loads(body, object_hook=lambda value: {key.lower(): item for key, item in value.items()}) if body else None
 
-def wait_ready():
+def wait_ready(token=None):
     for _ in range(90):
         try:
             info = request("/System/Info/Public")
             if not info.get("version", "").startswith("12."):
                 raise AssertionError("Smoke test requires Jellyfin 12")
+            # The startup server exposes public info before MVC and plugins are ready.
+            # Probe an actual controller, both on first boot and after restart.
+            request("/Plugins" if token else "/Startup/User", token=token)
             return
         except (OSError, AssertionError):
             time.sleep(2)
@@ -71,7 +74,7 @@ try:
     request("/Palco/Cache/smtp-config?ns=anfiteatro-registration", "POST", {"Value": value}, admin)
     assert request("/Palco/Cache/smtp-config?ns=anfiteatro-registration", token=admin)["value"] == value
     subprocess.run(["docker", "restart", container], check=True)
-    wait_ready()
+    wait_ready(admin)
     assert request("/Palco/Cache/smtp-config?ns=anfiteatro-registration", token=admin)["value"] == value
     print("Jellyfin 12 smoke passed: package loading, anonymous/user/admin policies, disabled registration, SMTP restart persistence")
 finally:

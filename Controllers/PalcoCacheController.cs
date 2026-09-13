@@ -127,8 +127,8 @@ public class PalcoCacheController(ILogger<PalcoCacheController> logger, Registra
                         mail.To.Add(adminEmail);
 
                         using var timeout = CancellationTokenSource.CreateLinkedTokenSource(HttpContext.RequestAborted);
-                        timeout.CancelAfter(TimeSpan.FromSeconds(30));
-                        await client.SendMailAsync(mail, timeout.Token);
+            timeout.CancelAfter(TimeSpan.FromSeconds(30));
+            await client.SendMailAsync(mail, timeout.Token);
                         logger.LogInformation(
                             "[Gelato] Palco Admin notification sent to {AdminEmail} for registration: {Id}",
                             adminEmail,
