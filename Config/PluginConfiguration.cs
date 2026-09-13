@@ -18,6 +18,7 @@ public class PluginConfiguration : BasePluginConfiguration
     public bool FilterUnreleased { get; set; } = false;
     public int FilterUnreleasedBufferDays { get; set; } = 0;
     public bool DisableSourceCount { get; set; } = true;
+    public bool PalcoEnabled { get; set; } = true;
     public bool P2PEnabled { get; set; } = false;
     public int P2PDLSpeed { get; set; } = 0;
     public int P2PULSpeed { get; set; } = 0;
@@ -150,6 +151,9 @@ public class UserConfig
             CreateCollections = baseConfig.CreateCollections,
             MaxCollectionItems = baseConfig.MaxCollectionItems,
             UserConfigs = baseConfig.UserConfigs,
+            LazyImages = baseConfig.LazyImages,
+            EnableJavaScriptInjection = baseConfig.EnableJavaScriptInjection,
+            PalcoEnabled = baseConfig.PalcoEnabled,
         };
     }
 }
@@ -159,7 +163,7 @@ public class GelatoStremioProviderFactory(IHttpClientFactory http, ILoggerFactor
     private readonly System.Collections.Concurrent.ConcurrentDictionary<
         string,
         GelatoStremioProvider
-    > _cache = new(StringComparer.OrdinalIgnoreCase);
+    > _cache = new(StringComparer.Ordinal);
 
     public GelatoStremioProvider Create(Guid userId)
     {
@@ -176,7 +180,11 @@ public class GelatoStremioProviderFactory(IHttpClientFactory http, ILoggerFactor
         );
     }
 
-    public void ClearCache() => _cache.Clear();
+    public void ClearCache()
+    {
+        foreach (var provider in _cache.Values) provider.ClearCache();
+        _cache.Clear();
+    }
 }
 
 public class CatalogConfig

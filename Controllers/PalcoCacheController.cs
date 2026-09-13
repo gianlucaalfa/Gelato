@@ -23,7 +23,8 @@ public class PalcoCacheController(ILogger<PalcoCacheController> logger, Registra
     private const string RegistrationNs = "anfiteatro-registration";
 
     // Access the service via GelatoPlugin instance or injection
-    private PalcoCacheService? Cache => GelatoPlugin.Instance?.PalcoCache;
+    private PalcoCacheService? Cache => GelatoPlugin.Instance?.Configuration.PalcoEnabled == true
+        ? GelatoPlugin.Instance.PalcoCache : null;
 
     // ========== PUBLIC ENDPOINTS (No Auth) ==========
 
@@ -35,7 +36,7 @@ public class PalcoCacheController(ILogger<PalcoCacheController> logger, Registra
     public ActionResult GetRegistrationEnabled()
     {
         var value = Cache?.Get("registration-enabled", RegistrationNs);
-        var enabled = RegistrationRequestLimiter.IsRegistrationEnabled(value);
+        var enabled = Cache is not null && RegistrationRequestLimiter.IsRegistrationEnabled(value);
         return Ok(new { enabled });
     }
 
@@ -247,6 +248,7 @@ public class PalcoCacheController(ILogger<PalcoCacheController> logger, Registra
     [Consumes(MediaTypeNames.Application.Json)]
     public async Task<ActionResult> SendEmail([FromBody] EmailRequest request)
     {
+        if (Cache is null) return StatusCode(503);
         try
         {
             using var client = new SmtpClient(request.SmtpHost, request.SmtpPort);

@@ -74,7 +74,7 @@ namespace Gelato.Providers
             _log.LogDebug("Subtitle list cache MISS key={Key}", listKey);
 
             var cfg = GelatoPlugin.Instance!.GetConfig(Guid.Empty);
-            var subs = await cfg.Stremio!.GetSubtitlesAsync(id, mediaType).ConfigureAwait(false);
+            var subs = await cfg.Stremio!.GetSubtitlesAsync(id, mediaType, ct).ConfigureAwait(false);
 
             _cache.Set(listKey, (IReadOnlyList<StremioSubtitle>)subs, CacheTtl);
 

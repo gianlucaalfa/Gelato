@@ -125,7 +125,7 @@ public sealed class ItemCountServiceDecorator(IItemCountService inner, IItemRepo
 
         // Jellyfin counts no user access here, only direct children: the episodes of a season by
         // SeasonId, and by ParentId the items that sit in no season.
-        var streams = GetStreamRows(parentIds, null);
+        var streams = GetStreamRows(parentIds, null, includeVersions: true);
         foreach (var stream in streams)
         {
             var parentId =
@@ -144,12 +144,15 @@ public sealed class ItemCountServiceDecorator(IItemCountService inner, IItemRepo
     /// The stream rows below any of <paramref name="ancestorIds"/> that
     /// <paramref name="user"/> may see, which is what Jellyfin counted for them.
     /// </summary>
-    private List<BaseItem> GetStreamRows(IReadOnlyList<Guid> ancestorIds, User? user)
+    private List<BaseItem> GetStreamRows(IReadOnlyList<Guid> ancestorIds, User? user, bool includeVersions = false)
     {
         if (ancestorIds.Count == 0)
             return [];
 
-        return repo.GetItemList(StreamRowsQuery(ancestorIds, user))
+        var query = StreamRowsQuery(ancestorIds, user);
+        // ChildCount counts linked versions; played/total already exclude them in Jellyfin 12.
+        query.IncludeOwnedItems = includeVersions;
+        return repo.GetItemList(query)
             .Where(i => i.HasStreamTag())
             .ToList();
     }

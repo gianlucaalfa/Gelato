@@ -1,4 +1,6 @@
 using System.Globalization;
+using Gelato.Services;
+using Microsoft.Extensions.Caching.Memory;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using MediaBrowser.Controller.Entities;
@@ -22,17 +24,14 @@ public class GelatoStremioProvider(
     };
 
     private static readonly TimeSpan MetaCacheTtl = TimeSpan.FromMinutes(5);
-    private readonly System.Collections.Concurrent.ConcurrentDictionary<
-        string,
-        (StremioMeta Meta, DateTime Expiry)
-    > _metaCache = new(StringComparer.OrdinalIgnoreCase);
+    private readonly GelatoCache _metaCache = new();
 
-    private StremioMeta? GetCachedMeta(string id)
+    public void ClearCache()
     {
-        if (_metaCache.TryGetValue(id, out var entry) && entry.Expiry > DateTime.UtcNow)
-            return entry.Meta;
-        _metaCache.TryRemove(id, out _);
-        return null;
+        _metaCache.Clear();
+        _manifest = null;
+        _movieSearchCatalog = null;
+        _seriesSearchCatalog = null;
     }
 
     private HttpClient NewClient()
@@ -59,49 +58,24 @@ public class GelatoStremioProvider(
         return url;
     }
 
-    private async Task<T?> GetJsonAsync<T>(string url)
+    private async Task<T?> GetJsonAsync<T>(string url, CancellationToken ct = default)
     {
-        log.LogDebug("GetJsonAsync: requesting {Url}", url);
-
-        try
-        {
-            var c = NewClient();
-            var resp = await c.GetAsync(url).ConfigureAwait(false); // No using statement
-
-            if (!resp.IsSuccessStatusCode)
-            {
-                log.LogWarning(
-                    "GetJsonAsync: request failed for {Url} with {StatusCode} {ReasonPhrase}",
-                    url,
-                    resp.StatusCode,
-                    resp.ReasonPhrase
-                );
-
-                throw new HttpRequestException(
-                    $"HTTP {resp.StatusCode}: {resp.ReasonPhrase}",
-                    null,
-                    resp.StatusCode
-                );
-            }
-
-            await using var s = await resp.Content.ReadAsStreamAsync().ConfigureAwait(false);
-            return await JsonSerializer.DeserializeAsync<T>(s, JsonOpts).ConfigureAwait(false);
-        }
-        catch (Exception ex)
-        {
-            log.LogError(ex, "GetJsonAsync: error fetching or parsing {Url}", url);
-            throw;
-        }
+        // Addon paths and query strings can contain access tokens. Never log the complete URL.
+        using var client = NewClient();
+        using var response = await client.GetAsync(url, HttpCompletionOption.ResponseHeadersRead, ct).ConfigureAwait(false);
+        response.EnsureSuccessStatusCode();
+        await using var stream = await response.Content.ReadAsStreamAsync(ct).ConfigureAwait(false);
+        return await JsonSerializer.DeserializeAsync<T>(stream, JsonOpts, ct).ConfigureAwait(false);
     }
 
-    public async Task<StremioManifest?> GetManifestAsync(bool force = false)
+    public async Task<StremioManifest?> GetManifestAsync(bool force = false, CancellationToken ct = default)
     {
         if (!force && _manifest is not null)
             return _manifest;
         try
         {
             var url = $"{baseUrl}/manifest.json";
-            var m = await GetJsonAsync<StremioManifest>(url);
+            var m = await GetJsonAsync<StremioManifest>(url, ct);
             _manifest = m;
 
             if (m?.Catalogs != null)
@@ -164,21 +138,22 @@ public class GelatoStremioProvider(
     public async Task<StremioMeta?> GetMetaAsync(
         string id,
         StremioMediaType mediaType,
-        TimeSpan? ttl = null
+        TimeSpan? ttl = null,
+        CancellationToken ct = default
     )
     {
-        var cached = GetCachedMeta(id);
+        var cached = _metaCache.Get<StremioMeta>((mediaType, id));
         if (cached is not null)
             return cached;
 
         var url = BuildUrl(["meta", mediaType.ToString().ToLower(), id]);
-        var r = await GetJsonAsync<StremioMetaResponse>(url);
+        var r = await GetJsonAsync<StremioMetaResponse>(url, ct);
         if (r?.Meta is { } meta)
-            _metaCache[id] = (meta, DateTime.UtcNow.Add(ttl ?? MetaCacheTtl));
+            _metaCache.Set((mediaType, id), meta, ttl ?? MetaCacheTtl);
         return r?.Meta;
     }
 
-    public async Task<StremioMeta?> GetMetaAsync(BaseItem item)
+    public async Task<StremioMeta?> GetMetaAsync(BaseItem item, CancellationToken ct = default)
     {
         var id = item.GetProviderId("Imdb");
         if (id is null)
@@ -192,7 +167,7 @@ public class GelatoStremioProvider(
             }
             id = $"tmdb:{id}";
         }
-        return await GetMetaAsync(id, item.GetBaseItemKind().ToStremio()).ConfigureAwait(false);
+        return await GetMetaAsync(id, item.GetBaseItemKind().ToStremio(), ct: ct).ConfigureAwait(false);
     }
 
     /// <summary>
@@ -263,34 +238,36 @@ public class GelatoStremioProvider(
         }
     }
 
-    public async Task<List<StremioStream>> GetStreamsAsync(StremioUri uri)
+    public async Task<List<StremioStream>> GetStreamsAsync(StremioUri uri, CancellationToken ct = default)
     {
-        return await GetStreamsAsync(uri.ExternalId, uri.MediaType);
+        return await GetStreamsAsync(uri.ExternalId, uri.MediaType, ct);
     }
 
-    private async Task<List<StremioStream>> GetStreamsAsync(string id, StremioMediaType mediaType)
+    private async Task<List<StremioStream>> GetStreamsAsync(string id, StremioMediaType mediaType, CancellationToken ct)
     {
         var url = BuildUrl(["stream", mediaType.ToString().ToLower(), id]);
-        var r = await GetJsonAsync<StremioStreamsResponse>(url);
+        var r = await GetJsonAsync<StremioStreamsResponse>(url, ct);
 
         return r?.Streams ?? [];
     }
 
     public async Task<List<StremioSubtitle>> GetSubtitlesAsync(
         string id,
-        StremioMediaType mediaType
+        StremioMediaType mediaType,
+        CancellationToken ct = default
     )
     {
         var url = BuildUrl(["subtitles", mediaType.ToString().ToLower(), id]);
-        var r = await GetJsonAsync<StremioSubtitleResponse>(url);
-        return r.Subtitles;
+        var r = await GetJsonAsync<StremioSubtitleResponse>(url, ct);
+        return r?.Subtitles ?? [];
     }
 
     public async Task<IReadOnlyList<StremioMeta>> GetCatalogMetasAsync(
         string id,
         string mediaType,
         string? search = null,
-        int? skip = null
+        int? skip = null,
+        CancellationToken ct = default
     )
     {
         var extras = new List<string>();
@@ -301,17 +278,18 @@ public class GelatoStremioProvider(
 
         // seen maybe one type thats capital, but thats their issue
         var url = BuildUrl(["catalog", mediaType.ToLower(), id], extras);
-        var r = await GetJsonAsync<StremioCatalogResponse>(url);
+        var r = await GetJsonAsync<StremioCatalogResponse>(url, ct);
         return r?.Metas ?? [];
     }
 
     public async Task<IReadOnlyList<StremioMeta>> SearchAsync(
         string query,
         StremioMediaType mediaType,
-        int? skip = null
+        int? skip = null,
+        CancellationToken ct = default
     )
     {
-        var manifest = await GetManifestAsync();
+        var manifest = await GetManifestAsync(ct: ct);
         if (manifest == null)
             return [];
 
@@ -331,7 +309,7 @@ public class GelatoStremioProvider(
             return [];
         }
 
-        return await GetCatalogMetasAsync(catalog.Id, mediaType.ToString(), query, skip);
+        return await GetCatalogMetasAsync(catalog.Id, mediaType.ToString(), query, skip, ct);
     }
 }
 

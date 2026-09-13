@@ -34,7 +34,13 @@ public class ServiceRegistrator : IPluginServiceRegistrator
         services.AddSingleton<ImageResourceFilter>();
         services.AddSingleton<DeleteResourceFilter>();
         services.AddSingleton<DownloadFilter>();
+        services.AddSingleton<GelatoCache>();
         services.AddSingleton<GelatoManager>();
+        services.AddSingleton<StreamSyncService>();
+        services.AddSingleton<TorrentAccess>();
+        services.AddSingleton<TorrentSessionService>();
+        services.AddSingleton<IHostedService>(sp => sp.GetRequiredService<TorrentSessionService>());
+        services.AddSingleton<StreamPreparationFilter>();
         services.DecorateSingle<IItemRepository, GelatoItemRepository>();
         services.AddSingleton(sp => (GelatoItemRepository)sp.GetRequiredService<IItemRepository>());
         services.DecorateSingle<IItemCountService, ItemCountServiceDecorator>();
@@ -47,6 +53,7 @@ public class ServiceRegistrator : IPluginServiceRegistrator
         services.AddSingleton<PalcoCacheService>();
         services.AddSingleton<IHostedService, GelatoJavaScriptRegistrationService>();
         services.AddSingleton<IHostedService, UpgradeRepairService>();
+        services.AddSingleton<IHostedService, StreamUserDataSync>();
         services.AddSingleton<SubtitleProvider>();
         services.AddSingleton<ISubtitleProvider>(sp => sp.GetRequiredService<SubtitleProvider>());
         services.AddSingleton(sp => new Lazy<SubtitleProvider>(
@@ -112,6 +119,7 @@ public class ServiceRegistrator : IPluginServiceRegistrator
             o.Filters.AddService<InsertActionFilter>(order: 1);
             o.Filters.AddService<SearchActionFilter>(order: 2);
             o.Filters.AddService<PlaybackInfoFilter>(order: 3);
+            o.Filters.AddService<StreamPreparationFilter>(order: 4);
             o.Filters.AddService<ImageResourceFilter>();
             o.Filters.AddService<DeleteResourceFilter>();
             o.Filters.AddService<DownloadFilter>();

@@ -57,14 +57,14 @@ public sealed class DownloadFilter(
                 var resp = await client.GetAsync(
                     path,
                     HttpCompletionOption.ResponseHeadersRead,
-                    CancellationToken.None
+                    ctx.HttpContext.RequestAborted
                 );
 
                 resp.EnsureSuccessStatusCode();
 
                 ctx.HttpContext.Response.RegisterForDispose(resp);
 
-                var stream = await resp.Content.ReadAsStreamAsync(CancellationToken.None);
+                var stream = await resp.Content.ReadAsStreamAsync(ctx.HttpContext.RequestAborted);
 
                 var contentType =
                     resp.Content.Headers.ContentType?.ToString() ?? "application/octet-stream";
