@@ -31,7 +31,7 @@ public sealed class PurgeGelatoStreamsTask(
         ];
     }
 
-    public Task ExecuteAsync(IProgress<double> progress, CancellationToken cancellationToken)
+    public async Task ExecuteAsync(IProgress<double> progress, CancellationToken cancellationToken)
     {
         log.LogInformation("purging streams");
 
@@ -55,55 +55,39 @@ public sealed class PurgeGelatoStreamsTask(
             .Where(v => v.IsStream())
             .ToArray();
 
-        // Unlink them first: deleting a linked version makes Jellyfin save its movie once per row.
-        foreach (var group in streams.Where(v => v.PrimaryVersionId.HasValue).GroupBy(v => v.PrimaryVersionId!.Value))
-        {
-            if (libraryManager.GetItemById(group.Key) is Video primary)
-            {
-                var ids = group.Select(v => v.Id).ToHashSet();
-                primary.LinkedAlternateVersions = primary
-                    .LinkedAlternateVersions.Where(l => l.ItemId is not { } id || !ids.Contains(id))
-                    .ToArray();
-                persistence.SaveItems([primary], cancellationToken);
-            }
-
-            foreach (var stream in group)
-            {
-                stream.SetPrimaryVersionId(null);
-            }
-        }
-
-        manager.ForgetWatchState(streams, cancellationToken);
-        var total = streams.Length;
-
         var done = 0;
-
-        foreach (var item in streams)
+        foreach (var group in streams.GroupBy(v => v.PrimaryVersionId ?? v.Id))
         {
-            cancellationToken.ThrowIfCancellationRequested();
-
-            try
+            await manager.RunStreamMutationAsync(group.Key, token =>
             {
-                libraryManager.DeleteItem(
-                    item,
-                    new DeleteOptions { DeleteFileLocation = false },
-                    true
-                );
-            }
-            catch (Exception ex)
-            {
-                log.LogWarning(ex, "Failed to delete item {ItemId}", item.Id);
-            }
-
-            done++;
-            var pct = Math.Min(100.0, ((double)done / total) * 100.0);
-            progress?.Report(pct);
+                // Reload inside the same lock used by synchronization and manual deletion.
+                var current = group.Select(row => libraryManager.GetItemById(row.Id))
+                    .OfType<Video>().Where(row => row.HasStreamTag()).ToArray();
+                if (libraryManager.GetItemById(group.Key) is Video primary && !primary.HasStreamTag())
+                {
+                    var ids = current.Select(row => row.Id).ToHashSet();
+                    primary.LinkedAlternateVersions = primary.LinkedAlternateVersions
+                        .Where(link => link.ItemId is not { } id || !ids.Contains(id)).ToArray();
+                    persistence.SaveItems([primary], token);
+                    libraryManager.RegisterItem(primary);
+                }
+                foreach (var row in current) row.SetPrimaryVersionId(null);
+                manager.ForgetWatchState(current, token);
+                foreach (var row in current)
+                {
+                    token.ThrowIfCancellationRequested();
+                    try { libraryManager.DeleteItem(row, new DeleteOptions { DeleteFileLocation = false }, true); }
+                    catch (Exception ex) { log.LogWarning(ex, "Failed to delete stream {ItemId}", row.Id); }
+                }
+                return Task.CompletedTask;
+            }, cancellationToken).ConfigureAwait(false);
+            done += group.Count();
+            progress?.Report(100.0 * done / Math.Max(1, streams.Length));
         }
 
         progress?.Report(100.0);
         manager.ClearCache();
 
         log.LogInformation("stream purge completed");
-        return Task.CompletedTask;
     }
 }

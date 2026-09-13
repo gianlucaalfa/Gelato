@@ -43,7 +43,6 @@ public sealed class MediaSourceManagerDecorator(
     IServerConfigurationManager config,
     //Lazy<ISubtitleManager> subtitleManager,
     Lazy<GelatoManager> manager,
-    Lazy<SubtitleProvider> subtitleProvider,
     IMediaSegmentManager mediaSegmentManager,
     Lazy<IProviderManager> providerManager
 ) : IMediaSourceManager
@@ -54,7 +53,6 @@ public sealed class MediaSourceManagerDecorator(
         log ?? throw new ArgumentNullException(nameof(log));
     private readonly IHttpContextAccessor _http =
         http ?? throw new ArgumentNullException(nameof(http));
-    private readonly KeyLock _lock = new();
     private readonly IMediaSegmentManager _mediaSegmentManager =
         mediaSegmentManager ?? throw new ArgumentNullException(nameof(mediaSegmentManager));
     private readonly ILibraryManager _libraryManager =
@@ -62,7 +60,6 @@ public sealed class MediaSourceManagerDecorator(
     private readonly IServerConfigurationManager _config =
         config ?? throw new ArgumentNullException(nameof(config));
     private readonly Lazy<GelatoManager> _manager = manager;
-    private readonly Lazy<SubtitleProvider> _subtitleProvider = subtitleProvider;
 
     //  private readonly Lazy<ISubtitleManager> _subtitleManager = subtitleManager ?? throw new ArgumentNullException(nameof(subtitleManager));
     // Lazy: ProviderManager depends on ISubtitleManager, which depends on
@@ -99,7 +96,8 @@ public sealed class MediaSourceManagerDecorator(
         }
         else
         {
-            ctx.TryGetUserId(out userId);
+            userId = Guid.Empty;
+            ctx?.TryGetUserId(out userId);
         }
 
         var cfg = GelatoPlugin.Instance!.GetConfig(userId);

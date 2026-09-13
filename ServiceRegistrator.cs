@@ -34,6 +34,7 @@ public class ServiceRegistrator : IPluginServiceRegistrator
         services.AddHttpClient(nameof(GelatoStremioProvider)).RemoveAllLoggers();
         services.AddHttpClient(nameof(SubtitleProvider)).RemoveAllLoggers();
         services.AddHttpClient(nameof(HttpStreamDownloadResult)).RemoveAllLoggers();
+        services.AddHttpClient(nameof(ImageResourceFilter)).RemoveAllLoggers();
         services.AddSingleton<InsertActionFilter>();
         services.AddSingleton<SearchActionFilter>();
         services.AddSingleton<PlaybackInfoFilter>();

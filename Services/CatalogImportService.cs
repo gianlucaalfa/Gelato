@@ -75,8 +75,10 @@ public class CatalogImportService(
         {
             var skip = 0;
             var processedItems = 0;
+            var importFailures = 0;
+            var importOrder = new Dictionary<string, int>(StringComparer.Ordinal);
             // keyed on stremio meta.Id to deduplicate within the import run
-            var importedIds = new ConcurrentDictionary<string, Guid>(StringComparer.OrdinalIgnoreCase);
+            var importedIds = new ConcurrentDictionary<string, Guid>(StringComparer.Ordinal);
 
             while (processedItems < maxItems)
             {
@@ -94,6 +96,9 @@ public class CatalogImportService(
                 var remaining = maxItems - processedItems;
                 var batch = page.Take(remaining).ToList();
 
+                for (var index = 0; index < batch.Count; index++)
+                    importOrder.TryAdd($"{batch[index].Type}:{batch[index].Id}", skip + index);
+
                 await Parallel
                     .ForEachAsync(
                         batch,
@@ -104,7 +109,8 @@ public class CatalogImportService(
                         },
                         async (meta, innerCt) =>
                         {
-                            if (!importedIds.TryAdd(meta.Id, Guid.Empty))
+                            var key = $"{meta.Type}:{meta.Id}";
+                            if (!importedIds.TryAdd(key, Guid.Empty))
                             {
                                 Interlocked.Increment(ref processedItems);
                                 return;
@@ -138,11 +144,12 @@ public class CatalogImportService(
                                         .ConfigureAwait(false);
 
                                     if (item != null)
-                                        importedIds[meta.Id] = item.Id;
+                                        importedIds[key] = item.Id;
                                 }
                                 catch (OperationCanceledException) when (innerCt.IsCancellationRequested) { throw; }
                                 catch (Exception ex)
                                 {
+                                    Interlocked.Increment(ref importFailures);
                                     logger.LogError(
                                         "{CatId}: insert meta failed for {Id}. Exception: {Message}\n{StackTrace}",
                                         catalogId,
@@ -166,7 +173,9 @@ public class CatalogImportService(
             {
                 await UpdateCollectionAsync(
                         catalogCfg,
-                        importedIds.Values.Where(id => id != Guid.Empty).Take(Math.Max(1, cfg.MaxCollectionItems)).ToList(), ct
+                        importedIds.OrderBy(entry => importOrder[entry.Key]).Select(entry => entry.Value)
+                            .Where(id => id != Guid.Empty).Take(Math.Max(1, cfg.MaxCollectionItems)).ToList(), ct,
+                        removeMissing: importFailures == 0
                     )
                     .ConfigureAwait(false);
             }
@@ -232,7 +241,7 @@ public class CatalogImportService(
         return collection;
     }
 
-    private async Task UpdateCollectionAsync(CatalogConfig config, List<Guid> ids, CancellationToken ct)
+    private async Task UpdateCollectionAsync(CatalogConfig config, List<Guid> ids, CancellationToken ct, bool removeMissing)
     {
         logger.LogInformation(
             "Updating collection {Name} with {Count} items",
@@ -251,7 +260,7 @@ public class CatalogImportService(
                 ct.ThrowIfCancellationRequested();
                 var desired = ids.ToHashSet();
                 var existing = currentChildren.ToHashSet();
-                var remove = existing.Except(desired).ToArray();
+                var remove = removeMissing ? existing.Except(desired).ToArray() : [];
                 var add = desired.Except(existing).ToArray();
                 if (remove.Length > 0)
                     await collectionManager.RemoveFromCollectionAsync(collection.Id, remove).ConfigureAwait(false);

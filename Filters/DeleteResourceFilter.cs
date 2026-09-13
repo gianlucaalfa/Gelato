@@ -40,15 +40,19 @@ public sealed class DeleteResourceFilter(
         }
 
         // Handle deletion and return 204 No Content
-        DeleteItem(item);
+        await manager.RunStreamMutationAsync((item as Video)?.PrimaryVersionId ?? item.Id, _ =>
+        {
+            DeleteItem(item, user);
+            return Task.CompletedTask;
+        }, ctx.HttpContext.RequestAborted);
         ctx.Result = new NoContentResult();
     }
 
-    private void DeleteItem(BaseItem item)
+    private void DeleteItem(BaseItem item, Jellyfin.Database.Implementations.Entities.User user)
     {
         if (item.IsPrimaryVersion())
         {
-            DeleteStreams(item);
+            DeleteStreams(item, user);
         }
         else
         {
@@ -57,7 +61,7 @@ public sealed class DeleteResourceFilter(
         }
     }
 
-    private void DeleteStreams(BaseItem item)
+    private void DeleteStreams(BaseItem item, Jellyfin.Database.Implementations.Entities.User user)
     {
         var query = new InternalItemsQuery
         {
@@ -67,6 +71,8 @@ public sealed class DeleteResourceFilter(
                 { "Stremio", item.ProviderIds["Stremio"] },
             },
             Recursive = false,
+            ParentId = item.ParentId,
+            IncludeOwnedItems = true,
             GroupByPresentationUniqueKey = false,
             GroupBySeriesPresentationUniqueKey = false,
             CollapseBoxSetItems = false,
@@ -74,11 +80,14 @@ public sealed class DeleteResourceFilter(
             IsDeadPerson = true,
         };
 
-        var sources = library.GetItemList(query);
+        var sources = library.GetItemList(query).Where(alt =>
+            (alt.Id == item.Id || (alt.HasStreamTag() && alt is Video version
+                && (version.PrimaryVersionId is null || version.PrimaryVersionId == item.Id)))
+            && manager.CanDelete(alt, user)).ToList();
         foreach (var alt in sources)
         {
             log.LogInformation("Deleting {Name} ({Id})", alt.Name, alt.Id);
-            library.DeleteItem(alt, new DeleteOptions { DeleteFileLocation = true }, true);
+            library.DeleteItem(alt, new DeleteOptions { DeleteFileLocation = false }, true);
         }
     }
 }

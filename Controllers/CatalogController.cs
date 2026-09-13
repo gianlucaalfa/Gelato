@@ -2,7 +2,6 @@ using Gelato.Config;
 using MediaBrowser.Common.Api;
 using Gelato.ScheduledTasks;
 using Gelato.Services;
-using MediaBrowser.Controller.Library;
 using MediaBrowser.Model.Tasks;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
@@ -17,8 +16,7 @@ public class CatalogController(
     ILogger<CatalogController> logger,
     CatalogService catalogService,
     CatalogImportQueue importQueue,
-    ITaskManager taskManager,
-    ILibraryManager libraryManager
+    ITaskManager taskManager
 ) : ControllerBase
 {
     [HttpGet]

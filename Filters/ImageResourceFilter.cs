@@ -63,49 +63,61 @@ public sealed class ImageResourceFilter(
 
         // Only handle cached search results — library items go through ProcessImage
         var url = manager.GetStremioMeta(guid)?.Poster;
-        if (url is null)
+        if (!Uri.TryCreate(url, UriKind.Absolute, out var target)
+            || (target.Scheme != Uri.UriSchemeHttp && target.Scheme != Uri.UriSchemeHttps))
         {
             await next();
             return;
         }
 
-        log.LogDebug("ImageFilter: proxying search result item={ItemId} url={Url}", guid, url);
+        log.LogDebug("ImageFilter: proxying search result item={ItemId}", guid);
 
         try
         {
-            var client = http.CreateClient();
+            using var timeout = CancellationTokenSource.CreateLinkedTokenSource(ctx.HttpContext.RequestAborted);
+            timeout.CancelAfter(TimeSpan.FromSeconds(30));
+            using var client = http.CreateClient(nameof(ImageResourceFilter));
             using var res = await client.GetAsync(
-                url,
+                target,
                 HttpCompletionOption.ResponseHeadersRead,
-                ctx.HttpContext.RequestAborted
+                timeout.Token
             );
 
             if (!res.IsSuccessStatusCode)
             {
                 log.LogWarning(
-                    "ImageFilter: upstream returned {Status} for item={ItemId} url={Url}",
+                    "ImageFilter: upstream returned {Status} for item={ItemId}",
                     res.StatusCode,
-                    guid,
-                    url
+                    guid
                 );
                 await next();
                 return;
             }
 
-            var contentType = res.Content.Headers.ContentType?.ToString() ?? "image/jpeg";
+            var contentType = res.Content.Headers.ContentType?.MediaType?.ToLowerInvariant();
+            if (contentType is not ("image/jpeg" or "image/png" or "image/webp" or "image/gif" or "image/avif" or "image/bmp"))
+            {
+                await next();
+                return;
+            }
+            await res.Content.LoadIntoBufferAsync(16 * 1024 * 1024, timeout.Token).ConfigureAwait(false);
+            ctx.HttpContext.Response.Headers["X-Content-Type-Options"] = "nosniff";
             ctx.HttpContext.Response.ContentType = contentType;
 
+            if (Microsoft.AspNetCore.Http.HttpMethods.IsHead(ctx.HttpContext.Request.Method)) return;
             await using var responseStream = await res.Content.ReadAsStreamAsync(
-                ctx.HttpContext.RequestAborted
+                timeout.Token
             );
             await responseStream.CopyToAsync(
                 ctx.HttpContext.Response.Body,
-                ctx.HttpContext.RequestAborted
+                timeout.Token
             );
         }
+        catch (OperationCanceledException) when (ctx.HttpContext.RequestAborted.IsCancellationRequested) { throw; }
         catch (Exception ex)
         {
-            log.LogWarning(ex, "ImageFilter: proxy failed for item={ItemId} url={Url}", guid, url);
+            log.LogWarning(ex, "ImageFilter: proxy failed for item={ItemId}", guid);
+            if (ctx.HttpContext.Response.HasStarted) throw;
             await next();
         }
     }
