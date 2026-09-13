@@ -1,0 +1,20 @@
+[
+  {
+    "name": "Gelato",
+    "guid": "94EA4E14-8163-4989-96FE-0A2094BC2D6A",
+    "owner": "gianlucaalfa",
+    "category": "General",
+    "overview": "Gelato hardening preview channel",
+    "description": "Security and HTTP streaming improvements. Independent preview update channel.",
+    "versions": [
+      {
+        "version": "0.26.17.1007",
+        "targetAbi": "12.0.0.0",
+        "checksum": "440b6339082b5ad61a579cc7ed68f1f5",
+        "sourceUrl": "https://github.com/gianlucaalfa/Gelato/releases/download/hardening-v0.26.17.1007/gelato_0.26.17.1007.zip",
+        "timestamp": "2026-09-13T22:12:36Z",
+        "changelog": "Hardening preview from commit c9e5b0423a6c1deec4049dc2558db3dc0782db5e. Regression tests passed before publication."
+      }
+    ]
+  }
+]
