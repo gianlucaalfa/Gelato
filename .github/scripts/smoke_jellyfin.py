@@ -34,13 +34,13 @@ def request(path, method="GET", data=None, token=None, expected=200):
         status, body = error.code, error.read()
     if status != expected:
         raise AssertionError(f"{method} {path}: expected {expected}, got {status}")
-    return json.loads(body) if body else None
+    return json.loads(body, object_hook=lambda value: {key.lower(): item for key, item in value.items()}) if body else None
 
 def wait_ready():
     for _ in range(90):
         try:
             info = request("/System/Info/Public")
-            if not info["Version"].startswith("12."):
+            if not info.get("version", "").startswith("12."):
                 raise AssertionError("Smoke test requires Jellyfin 12")
             return
         except (OSError, AssertionError):
@@ -51,17 +51,17 @@ try:
     subprocess.run(["docker", "run", "--detach", "--name", container,
                     "--publish", "127.0.0.1:18096:8096",
                     "--volume", f"{config}:/config", "--volume", f"{cache}:/cache",
-                    "jellyfin/jellyfin:12.0"], check=True)
+                    "jellyfin/jellyfin:12.0@sha256:baba630419915985442f315f08b0cf46d9f4c8a0cc4bd38e94a6d35751dd5ef5"], check=True)
     wait_ready()
     request("/Startup/User")
     password = secrets.token_urlsafe(24)
     request("/Startup/User", "POST", {"Name": "smoke-admin", "Password": password}, expected=204)
     request("/Startup/Complete", "POST", expected=204)
-    admin = request("/Users/AuthenticateByName", "POST", {"Username": "smoke-admin", "Pw": password})["AccessToken"]
+    admin = request("/Users/AuthenticateByName", "POST", {"Username": "smoke-admin", "Pw": password})["accesstoken"]
     plugins = request("/Plugins", token=admin)
-    assert any(p["Name"] == "Gelato" and p["Version"] == os.environ["PLUGIN_VERSION"] for p in plugins)
+    assert any(p["name"] == "Gelato" and p["version"] == os.environ["PLUGIN_VERSION"] for p in plugins)
     request("/Users/New", "POST", {"Name": "smoke-user", "Password": password}, admin)
-    user = request("/Users/AuthenticateByName", "POST", {"Username": "smoke-user", "Pw": password})["AccessToken"]
+    user = request("/Users/AuthenticateByName", "POST", {"Username": "smoke-user", "Pw": password})["accesstoken"]
     request("/Palco/Cache/smtp-config?ns=anfiteatro-registration", expected=401)
     request("/Palco/Cache/smtp-config?ns=anfiteatro-registration", token=user, expected=403)
     request("/gelato/catalogs/import-all", "POST", token=user, expected=403)
@@ -69,12 +69,13 @@ try:
     request("/Palco/Registration/Request", "POST", {"Id": "request-smoke", "Data": "{}"}, expected=403)
     value = json.dumps({"Password": "ephemeral-smoke-secret"})
     request("/Palco/Cache/smtp-config?ns=anfiteatro-registration", "POST", {"Value": value}, admin)
-    assert request("/Palco/Cache/smtp-config?ns=anfiteatro-registration", token=admin)["Value"] == value
+    assert request("/Palco/Cache/smtp-config?ns=anfiteatro-registration", token=admin)["value"] == value
     subprocess.run(["docker", "restart", container], check=True)
     wait_ready()
-    assert request("/Palco/Cache/smtp-config?ns=anfiteatro-registration", token=admin)["Value"] == value
+    assert request("/Palco/Cache/smtp-config?ns=anfiteatro-registration", token=admin)["value"] == value
     print("Jellyfin 12 smoke passed: package loading, anonymous/user/admin policies, disabled registration, SMTP restart persistence")
 finally:
     logs = subprocess.run(["docker", "logs", container], capture_output=True, text=True)
     Path("jellyfin-smoke.log").write_text(logs.stdout + logs.stderr)
+    print("\n".join((logs.stdout + logs.stderr).splitlines()[-120:]))
     subprocess.run(["docker", "rm", "--force", container], check=False)
