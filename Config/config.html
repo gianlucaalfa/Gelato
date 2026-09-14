@@ -69,6 +69,11 @@
             </div>
        
 
+              <div class="checkboxContainer checkboxContainer-withDescription">
+                <label><input is="emby-checkbox" type="checkbox" id="chkPalcoEnabled" /><span>Enable Palco integration</span></label>
+                <div class="fieldDescription">Enable the optional Anfiteatro registration and cache API. Administration requires an administrator account.</div>
+              </div>
+
             <div class="checkboxContainer checkboxContainer-withDescription">
               <label>
                 <input is="emby-checkbox" type="checkbox" id="chkLazyImages" />
@@ -298,6 +303,7 @@
         const txtBufferDays = page.querySelector('#txtBufferDays');
         const txtFFmpegAnalyzeDuration = page.querySelector('#txtFFmpegAnalyzeDuration');
         const txtFFmpegProbeSize = page.querySelector('#txtFFmpegProbeSize');
+        const chkPalcoEnabled = page.querySelector('#chkPalcoEnabled');
         const chkEnableJavaScriptInjection = page.querySelector('#chkEnableJavaScriptInjection');
         const chkLazyImages = page.querySelector('#chkLazyImages');
 
@@ -419,7 +425,7 @@
             // Type
             const typeCell = document.createElement('td');
             typeCell.style.padding = '10px';
-            typeCell.innerHTML = '<span style="padding: 2px 6px; border-radius: 4px; background: rgba(255,255,255,0.1); font-size: 0.9em;">' + cat.Type + '</span>';
+            typeCell.textContent = cat.Type;
             row.appendChild(typeCell);
 
             // Enabled
@@ -592,6 +598,7 @@
             if (txtBufferDays) txtBufferDays.value = cfg.FilterUnreleasedBufferDays ?? 0;
             if (txtFFmpegAnalyzeDuration) txtFFmpegAnalyzeDuration.value = cfg.FFmpegAnalyzeDuration || "5M";
             if (txtFFmpegProbeSize) txtFFmpegProbeSize.value = cfg.FFmpegProbeSize || "25M";
+            chkPalcoEnabled.checked = cfg.PalcoEnabled !== false;
             if (chkEnableJavaScriptInjection) chkEnableJavaScriptInjection.checked = cfg.EnableJavaScriptInjection || false;
             if (chkLazyImages) chkLazyImages.checked = cfg.LazyImages ?? false;
 
@@ -627,6 +634,7 @@
 
             cfg.FFmpegAnalyzeDuration = txtFFmpegAnalyzeDuration.value;
             cfg.FFmpegProbeSize = txtFFmpegProbeSize.value;
+            cfg.PalcoEnabled = chkPalcoEnabled.checked;
             cfg.EnableJavaScriptInjection = chkEnableJavaScriptInjection.checked;
             cfg.LazyImages = chkLazyImages.checked;
 

@@ -5,6 +5,7 @@ on:
 
 jobs:
   release:
+    if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
 
     permissions:
@@ -12,11 +13,17 @@ jobs:
 
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
           token: ${{ secrets.RELEASE_TOKEN }}
           fetch-depth: 0
+          persist-credentials: false
 
+      - uses: actions/setup-dotnet@67a3573c9a986a3f9c594539f4ab511d57bb3ce9
+        with:
+          dotnet-version: '10.0.x'
+      - name: Verify release source before tagging
+        run: dotnet test tests/Gelato.Tests/Gelato.Tests.csproj --configuration Release -p:PreserveTestDependencies=true
       - name: Create GitHub release from build.yaml version
         env:
           GH_TOKEN: ${{ secrets.RELEASE_TOKEN }}

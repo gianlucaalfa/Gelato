@@ -1,0 +1,73 @@
+name: Regression Tests
+
+on:
+  push:
+    branches: [main, fix/hardening-native-versions]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: regression-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - uses: actions/setup-dotnet@67a3573c9a986a3f9c594539f4ab511d57bb3ce9
+        with:
+          dotnet-version: '10.0.x'
+      - name: Build plugin and run regression tests
+        run: dotnet test tests/Gelato.Tests/Gelato.Tests.csproj --configuration Release -p:PreserveTestDependencies=true --logger "trx;LogFileName=regression.trx"
+      - name: Verify source formatting before publication
+        run: dotnet format Gelato.sln --verify-no-changes --no-restore
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: regression-results
+          path: tests/Gelato.Tests/TestResults/*.trx
+
+  publish-preview:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/fix/hardening-native-versions' && github.repository == 'gianlucaalfa/Gelato'
+    needs: test
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    concurrency:
+      group: hardening-feed
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - uses: actions/setup-dotnet@67a3573c9a986a3f9c594539f4ab511d57bb3ce9
+        with:
+          dotnet-version: '10.0.x'
+      - name: Choose numeric preview version
+        run: echo "PLUGIN_VERSION=0.26.17.$((1000 + GITHUB_RUN_NUMBER))" >> "$GITHUB_ENV"
+      - name: Build installable plugin
+        run: dotnet build Gelato.csproj --configuration Release -p:Version="$PLUGIN_VERSION" -p:AssemblyVersion="$PLUGIN_VERSION" -p:FileVersion="$PLUGIN_VERSION"
+      - name: Package declared dependencies
+        run: python .github/scripts/package_hardening.py
+      - name: Verify package in Jellyfin 12
+        timeout-minutes: 10
+        run: python .github/scripts/smoke_jellyfin.py
+      - name: Verify package in LinuxServer Jellyfin 12
+        timeout-minutes: 10
+        env:
+          JELLYFIN_FLAVOR: linuxserver
+        run: python .github/scripts/smoke_jellyfin.py
+      - name: Upload server smoke logs
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: jellyfin-smoke-logs
+          path: jellyfin-smoke-*.log
+      - name: Publish prerelease and independent feed
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python .github/scripts/publish_hardening.py

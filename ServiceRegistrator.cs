@@ -1,4 +1,8 @@
 using Gelato.Config;
+using MediaBrowser.Controller.Chapters;
+using MediaBrowser.Controller.Trickplay;
+using MediaBrowser.Common.Configuration;
+using Microsoft.AspNetCore.DataProtection;
 using Gelato.Decorators;
 using Gelato.Filters;
 using Gelato.Providers;
@@ -28,13 +32,26 @@ public class ServiceRegistrator : IPluginServiceRegistrator
 {
     public void RegisterServices(IServiceCollection services, IServerApplicationHost host)
     {
+        SafeLog.Register(services);
+        // Configured addon paths can contain credentials; suppress HttpClient URL logging.
+        services.AddHttpClient(nameof(GelatoStremioProvider)).RemoveAllLoggers();
+        services.AddHttpClient(nameof(SubtitleProvider)).RemoveAllLoggers();
+        services.AddHttpClient(nameof(HttpStreamDownloadResult)).RemoveAllLoggers();
+        services.AddHttpClient(nameof(ImageResourceFilter)).RemoveAllLoggers();
         services.AddSingleton<InsertActionFilter>();
         services.AddSingleton<SearchActionFilter>();
         services.AddSingleton<PlaybackInfoFilter>();
         services.AddSingleton<ImageResourceFilter>();
         services.AddSingleton<DeleteResourceFilter>();
         services.AddSingleton<DownloadFilter>();
+        services.AddSingleton<GelatoCache>();
         services.AddSingleton<GelatoManager>();
+        services.AddSingleton<StreamSyncService>();
+        services.AddSingleton<TorrentAccess>();
+        services.AddSingleton<TorrentSessionService>();
+        services.AddSingleton<IHostedService>(sp => sp.GetRequiredService<TorrentSessionService>());
+        services.AddSingleton<StreamPreparationFilter>();
+        services.AddSingleton<StreamUserDataFilter>();
         services.DecorateSingle<IItemRepository, GelatoItemRepository>();
         services.AddSingleton(sp => (GelatoItemRepository)sp.GetRequiredService<IItemRepository>());
         services.DecorateSingle<IItemCountService, ItemCountServiceDecorator>();
@@ -42,9 +59,23 @@ public class ServiceRegistrator : IPluginServiceRegistrator
         services.AddSingleton(sp => new Lazy<GelatoManager>(sp.GetRequiredService<GelatoManager>));
         services.AddSingleton<CatalogService>();
         services.AddSingleton<CatalogImportService>();
-        services.AddSingleton<PalcoCacheService>();
+        services.AddSingleton<CatalogImportQueue>();
+        services.AddSingleton<IHostedService>(sp => sp.GetRequiredService<CatalogImportQueue>());
+        services.AddDataProtection();
+        services.AddSingleton<RegistrationRequestLimiter>();
+        services.AddSingleton<PalcoCacheService>(sp =>
+        {
+            var paths = sp.GetRequiredService<IApplicationPaths>();
+            var keys = new DirectoryInfo(Path.Combine(paths.DataPath, "Gelato", "keys"));
+            keys.Create();
+            if (!OperatingSystem.IsWindows())
+                File.SetUnixFileMode(keys.FullName, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
+            return new PalcoCacheService(paths, sp.GetRequiredService<ILogger<PalcoCacheService>>(),
+                DataProtectionProvider.Create(keys));
+        });
         services.AddSingleton<IHostedService, GelatoJavaScriptRegistrationService>();
         services.AddSingleton<IHostedService, UpgradeRepairService>();
+        services.AddSingleton<IHostedService, StreamUserDataSync>();
         services.AddSingleton<SubtitleProvider>();
         services.AddSingleton<ISubtitleProvider>(sp => sp.GetRequiredService<SubtitleProvider>());
         services.AddSingleton(sp => new Lazy<SubtitleProvider>(
@@ -92,7 +123,9 @@ public class ServiceRegistrator : IPluginServiceRegistrator
             .DecorateSingle<IPlaylistManager, PlaylistManagerDecorator>()
             .DecorateSingle<ISubtitleManager, SubtitleManagerDecorator>()
             .DecorateSingle<IProviderManager, ProviderManagerDecorator>()
-            .DecorateSingle<IImageProcessor, ImageProcessorDecorator>();
+            .DecorateSingle<IImageProcessor, ImageProcessorDecorator>()
+            .DecorateSingle<IChapterManager, ChapterManagerDecorator>()
+            .DecorateSingle<ITrickplayManager, TrickplayManagerDecorator>();
         // Expose the concrete decorator as Lazy so ImageProcessorDecorator can call SaveImageDirect
         // without introducing a circular dependency at construction time.
         services.AddSingleton(sp => new Lazy<ProviderManagerDecorator>(
@@ -110,9 +143,11 @@ public class ServiceRegistrator : IPluginServiceRegistrator
             o.Filters.AddService<InsertActionFilter>(order: 1);
             o.Filters.AddService<SearchActionFilter>(order: 2);
             o.Filters.AddService<PlaybackInfoFilter>(order: 3);
+            o.Filters.AddService<StreamPreparationFilter>(order: 4);
             o.Filters.AddService<ImageResourceFilter>();
             o.Filters.AddService<DeleteResourceFilter>();
             o.Filters.AddService<DownloadFilter>();
+            o.Filters.AddService<StreamUserDataFilter>();
         });
     }
 

@@ -1,4 +1,5 @@
 using System.Text.Json.Serialization;
+using System.ComponentModel.DataAnnotations;
 using System.Xml.Serialization;
 using MediaBrowser.Controller.Entities;
 using MediaBrowser.Model.Plugins;
@@ -18,6 +19,7 @@ public class PluginConfiguration : BasePluginConfiguration
     public bool FilterUnreleased { get; set; } = false;
     public int FilterUnreleasedBufferDays { get; set; } = 0;
     public bool DisableSourceCount { get; set; } = true;
+    public bool PalcoEnabled { get; set; } = true;
     public bool P2PEnabled { get; set; } = false;
     public int P2PDLSpeed { get; set; } = 0;
     public int P2PULSpeed { get; set; } = 0;
@@ -150,6 +152,9 @@ public class UserConfig
             CreateCollections = baseConfig.CreateCollections,
             MaxCollectionItems = baseConfig.MaxCollectionItems,
             UserConfigs = baseConfig.UserConfigs,
+            LazyImages = baseConfig.LazyImages,
+            EnableJavaScriptInjection = baseConfig.EnableJavaScriptInjection,
+            PalcoEnabled = baseConfig.PalcoEnabled,
         };
     }
 }
@@ -159,7 +164,7 @@ public class GelatoStremioProviderFactory(IHttpClientFactory http, ILoggerFactor
     private readonly System.Collections.Concurrent.ConcurrentDictionary<
         string,
         GelatoStremioProvider
-    > _cache = new(StringComparer.OrdinalIgnoreCase);
+    > _cache = new(StringComparer.Ordinal);
 
     public GelatoStremioProvider Create(Guid userId)
     {
@@ -172,11 +177,15 @@ public class GelatoStremioProviderFactory(IHttpClientFactory http, ILoggerFactor
         var baseUrl = cfg.GetBaseUrl();
         return _cache.GetOrAdd(
             baseUrl,
-            url => new GelatoStremioProvider(url, http, log.CreateLogger<GelatoStremioProvider>())
+            url => new GelatoStremioProvider(url, http, new Gelato.Services.RedactingLogger<GelatoStremioProvider>(log))
         );
     }
 
-    public void ClearCache() => _cache.Clear();
+    public void ClearCache()
+    {
+        foreach (var provider in _cache.Values) provider.ClearCache();
+        _cache.Clear();
+    }
 }
 
 public class CatalogConfig
@@ -187,7 +196,10 @@ public class CatalogConfig
     public bool Enabled { get; set; } = false;
 
     /// <summary>0 means "use global CatalogMaxItems".</summary>
+    [Range(0, 10000)]
     public int MaxItems { get; set; } = 0;
+
+    public int EffectiveMaxItems(int globalLimit) => Math.Clamp(MaxItems > 0 ? MaxItems : globalLimit, 1, 10000);
     public bool CreateCollection { get; set; } = false;
     public string Url { get; set; } = "";
 }

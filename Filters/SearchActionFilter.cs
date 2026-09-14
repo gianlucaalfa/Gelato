@@ -1,4 +1,5 @@
 using Gelato.Config;
+using Gelato.Services;
 using Jellyfin.Data.Enums;
 using MediaBrowser.Controller.Dto;
 using MediaBrowser.Model.Dto;
@@ -31,7 +32,7 @@ public class SearchActionFilter(
             // GetConfig falls back to a bare configuration when the Gelato url is unset,
             // which leaves Stremio null — let the request through untouched.
             || cfg.Stremio is not { } stremio
-            || !await stremio.IsReady()
+            || !await stremio.IsReady(ctx.HttpContext.RequestAborted)
         )
         {
             await next();
@@ -57,7 +58,7 @@ public class SearchActionFilter(
         ctx.TryGetActionArgument("startIndex", out var start, 0);
         ctx.TryGetActionArgument("limit", out var limit, 25);
 
-        var metas = await SearchMetasAsync(searchTerm, requestedTypes, cfg, userId);
+        var metas = await SearchMetasAsync(searchTerm, requestedTypes, cfg, userId, ctx.HttpContext.RequestAborted);
 
         log.LogInformation(
             "Intercepted /Items search \"{Query}\" types=[{Types}] start={Start} limit={Limit} results={Results}",
@@ -116,10 +117,11 @@ public class SearchActionFilter(
         string searchTerm,
         HashSet<BaseItemKind> requestedTypes,
         PluginConfiguration cfg,
-        Guid userId
+        Guid userId,
+        CancellationToken cancellationToken
     )
     {
-        var tasks = new List<Task<IReadOnlyList<StremioMeta>>>();
+        var tasks = new List<Func<CancellationToken, Task<IReadOnlyList<StremioMeta>>>>();
         var movieFolder = cfg.MovieFolder ?? manager.TryGetMovieFolder(userId);
         var seriesFolder = cfg.SeriesFolder ?? manager.TryGetSeriesFolder(userId);
 
@@ -129,7 +131,7 @@ public class SearchActionFilter(
 
         if (requestedTypes.Contains(BaseItemKind.Movie) && movieFolder is not null)
         {
-            tasks.Add(cfg.Stremio.SearchAsync(searchTerm, StremioMediaType.Movie));
+            tasks.Add(ct => cfg.Stremio.SearchAsync(searchTerm, StremioMediaType.Movie, ct: ct));
         }
         else if (requestedTypes.Contains(BaseItemKind.Movie))
         {
@@ -140,7 +142,7 @@ public class SearchActionFilter(
 
         if (requestedTypes.Contains(BaseItemKind.Series) && seriesFolder is not null)
         {
-            tasks.Add(cfg.Stremio.SearchAsync(searchTerm, StremioMediaType.Series));
+            tasks.Add(ct => cfg.Stremio.SearchAsync(searchTerm, StremioMediaType.Series, ct: ct));
         }
         else if (requestedTypes.Contains(BaseItemKind.Series))
         {
@@ -149,7 +151,9 @@ public class SearchActionFilter(
             );
         }
 
-        var results = (await Task.WhenAll(tasks)).SelectMany(r => r).ToList();
+        var results = await CatalogSearch.CollectAsync(tasks,
+            (index, error) => log.LogWarning("Search catalog {Index} failed ({ErrorType}); retaining other results",
+                index, error.GetType().Name), cancellationToken);
 
         var filterUnreleased = cfg.FilterUnreleased;
         var bufferDays = cfg.FilterUnreleasedBufferDays;

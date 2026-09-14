@@ -20,7 +20,13 @@ public class CatalogImportService(
     ILibraryManager libraryManager
 )
 {
-    public async Task ImportCatalogAsync(
+    private readonly KeyLock _catalogWrites = new();
+
+    public Task ImportCatalogAsync(string catalogId, string type, CancellationToken ct, IProgress<double>? progress = null) =>
+        _catalogWrites.RunSingleFlightAsync($"{type}:{catalogId}",
+            token => ImportCatalogCoreAsync(catalogId, type, token, progress), ct);
+
+    private async Task ImportCatalogCoreAsync(
         string catalogId,
         string type,
         CancellationToken ct,
@@ -54,7 +60,8 @@ public class CatalogImportService(
             logger.LogWarning("No movie root folder found");
         }
 
-        var maxItems = catalogCfg.MaxItems;
+        var maxItems = catalogCfg.EffectiveMaxItems(cfg.CatalogMaxItems);
+        if (stremio is null) return;
 
         var stopwatch = Stopwatch.StartNew();
         logger.LogInformation(
@@ -68,15 +75,17 @@ public class CatalogImportService(
         {
             var skip = 0;
             var processedItems = 0;
+            var importFailures = 0;
+            var importOrder = new Dictionary<string, int>(StringComparer.Ordinal);
             // keyed on stremio meta.Id to deduplicate within the import run
-            var importedIds = new ConcurrentDictionary<string, Guid>(StringComparer.OrdinalIgnoreCase);
+            var importedIds = new ConcurrentDictionary<string, Guid>(StringComparer.Ordinal);
 
             while (processedItems < maxItems)
             {
                 ct.ThrowIfCancellationRequested();
 
                 var page = await stremio
-                    .GetCatalogMetasAsync(catalogId, type, search: null, skip: skip)
+                    .GetCatalogMetasAsync(catalogId, type, search: null, skip: skip, ct: ct)
                     .ConfigureAwait(false);
 
                 if (page.Count == 0)
@@ -86,6 +95,9 @@ public class CatalogImportService(
 
                 var remaining = maxItems - processedItems;
                 var batch = page.Take(remaining).ToList();
+
+                for (var index = 0; index < batch.Count; index++)
+                    importOrder.TryAdd($"{batch[index].Type}:{batch[index].Id}", skip + index);
 
                 await Parallel
                     .ForEachAsync(
@@ -97,7 +109,8 @@ public class CatalogImportService(
                         },
                         async (meta, innerCt) =>
                         {
-                            if (!importedIds.TryAdd(meta.Id, Guid.Empty))
+                            var key = $"{meta.Type}:{meta.Id}";
+                            if (!importedIds.TryAdd(key, Guid.Empty))
                             {
                                 Interlocked.Increment(ref processedItems);
                                 return;
@@ -131,10 +144,12 @@ public class CatalogImportService(
                                         .ConfigureAwait(false);
 
                                     if (item != null)
-                                        importedIds[meta.Id] = item.Id;
+                                        importedIds[key] = item.Id;
                                 }
+                                catch (OperationCanceledException) when (innerCt.IsCancellationRequested) { throw; }
                                 catch (Exception ex)
                                 {
+                                    Interlocked.Increment(ref importFailures);
                                     logger.LogError(
                                         "{CatId}: insert meta failed for {Id}. Exception: {Message}\n{StackTrace}",
                                         catalogId,
@@ -158,21 +173,16 @@ public class CatalogImportService(
             {
                 await UpdateCollectionAsync(
                         catalogCfg,
-                        importedIds.Values.Where(id => id != Guid.Empty).Take(100).ToList()
+                        importedIds.OrderBy(entry => importOrder[entry.Key]).Select(entry => entry.Value)
+                            .Where(id => id != Guid.Empty).Take(Math.Max(1, cfg.MaxCollectionItems)).ToList(), ct,
+                        removeMissing: importFailures == 0
                     )
                     .ConfigureAwait(false);
             }
 
             logger.LogInformation("{Id}: processed ({Count} items)", catalogCfg.Id, processedItems);
         }
-        catch (OperationCanceledException ex)
-        {
-            logger.LogWarning(
-                ex,
-                "Catalog {Id} aborted due to non-user cancellation, continuing with next catalog",
-                catalogId
-            );
-        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }
         catch (Exception ex)
         {
             logger.LogError(
@@ -231,7 +241,7 @@ public class CatalogImportService(
         return collection;
     }
 
-    private async Task UpdateCollectionAsync(CatalogConfig config, List<Guid> ids)
+    private async Task UpdateCollectionAsync(CatalogConfig config, List<Guid> ids, CancellationToken ct, bool removeMissing)
     {
         logger.LogInformation(
             "Updating collection {Name} with {Count} items",
@@ -243,23 +253,22 @@ public class CatalogImportService(
             var collection = await GetOrCreateBoxSetAsync(config).ConfigureAwait(false);
             if (collection != null)
             {
-                var currentChildren = libraryManager
-                    .GetItemList(new InternalItemsQuery { Parent = collection, Recursive = false })
+                var currentChildren = collection.GetLinkedChildren()
                     .Select(i => i.Id)
                     .ToList();
 
-                if (currentChildren.Count != 0)
-                {
-                    await collectionManager
-                        .RemoveFromCollectionAsync(collection.Id, currentChildren)
-                        .ConfigureAwait(false);
-                }
-
-                await collectionManager
-                    .AddToCollectionAsync(collection.Id, ids)
-                    .ConfigureAwait(false);
+                ct.ThrowIfCancellationRequested();
+                var desired = ids.ToHashSet();
+                var existing = currentChildren.ToHashSet();
+                var remove = removeMissing ? existing.Except(desired).ToArray() : [];
+                var add = desired.Except(existing).ToArray();
+                if (remove.Length > 0)
+                    await collectionManager.RemoveFromCollectionAsync(collection.Id, remove).ConfigureAwait(false);
+                if (add.Length > 0)
+                    await collectionManager.AddToCollectionAsync(collection.Id, add).ConfigureAwait(false);
             }
         }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }
         catch (Exception ex)
         {
             logger.LogError(ex, "Error updating collection for {Name}", config.Name);
@@ -277,7 +286,8 @@ public class CatalogImportService(
             return;
         }
 
-        var total = enabled.Sum(c => c.MaxItems);
+        var globalLimit = GelatoPlugin.Instance!.Configuration.CatalogMaxItems;
+        var total = enabled.Sum(c => c.EffectiveMaxItems(globalLimit));
         var offset = 0;
 
         foreach (var cat in enabled)
@@ -285,7 +295,7 @@ public class CatalogImportService(
             ct.ThrowIfCancellationRequested();
             logger.LogInformation("Processing enabled catalog: {Name}", cat.Name);
 
-            var catMax = cat.MaxItems;
+            var catMax = cat.EffectiveMaxItems(globalLimit);
             var localOffset = offset;
             var catProgress = progress is null
                 ? null
@@ -299,8 +309,7 @@ public class CatalogImportService(
             offset += catMax;
         }
 
-        // collections appear empty after inporting this fixes that.. sometimes...
-        libraryManager.QueueLibraryScan();
+        // Collection updates persist their links and queue only the affected collection refresh.
 
         progress?.Report(100);
     }

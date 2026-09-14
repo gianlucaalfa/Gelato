@@ -90,7 +90,7 @@ namespace Gelato.Decorators
                 return false;
 
             var item = _libraryManager
-                .Value.GetItemList(new InternalItemsQuery { Path = path })
+                .Value.GetItemList(new InternalItemsQuery { Path = path, IncludeOwnedItems = true })
                 .FirstOrDefault();
             if (item is null || !item.IsGelato())
                 return false;

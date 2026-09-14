@@ -19,11 +19,12 @@
     <PackageReference Include="Microsoft.Data.Sqlite.Core" Version="10.0.0" PrivateAssets="all" />
   </ItemGroup>
   <ItemGroup>
+    <Compile Remove="tests/**/*.cs" />
     <EmbeddedResource Include="Config\config.html" />
     <!-- Embed all frontend assets so they are delivered with the plugin -->
     <EmbeddedResource Include="Frontend\**\*" />
   </ItemGroup>
-  <Target Name="CleanupJellyfinDlls" AfterTargets="Build">
+  <Target Name="CleanupJellyfinDlls" AfterTargets="Build" Condition="'$(PreserveTestDependencies)' != 'true'">
     <ItemGroup>
       <AllDlls Include="$(OutDir)*.dll" />
       <FilesToKeep

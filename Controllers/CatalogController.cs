@@ -1,7 +1,7 @@
 using Gelato.Config;
+using MediaBrowser.Common.Api;
 using Gelato.ScheduledTasks;
 using Gelato.Services;
-using MediaBrowser.Controller.Library;
 using MediaBrowser.Model.Tasks;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
@@ -11,13 +11,12 @@ namespace Gelato.Controllers;
 
 [ApiController]
 [Route("gelato/catalogs")]
-[Authorize]
+[Authorize(Policy = Policies.RequiresElevation)]
 public class CatalogController(
     ILogger<CatalogController> logger,
     CatalogService catalogService,
-    CatalogImportService importService,
-    ITaskManager taskManager,
-    ILibraryManager libraryManager
+    CatalogImportQueue importQueue,
+    ITaskManager taskManager
 ) : ControllerBase
 {
     [HttpGet]
@@ -48,33 +47,11 @@ public class CatalogController(
     [HttpPost("{id}/{type}/import")]
     public Task<ActionResult> TriggerImport([FromRoute] string id, [FromRoute] string type)
     {
-        logger.LogInformation("Manual import triggered for {Id} {Type}", id, type);
-
-        // Run in background? Or await?
-        // User probably wants to know it started.
-        // Awaiting might timeout if it takes long.
-        // But existing implementations awaited.
-        // Let's fire and forget but log, or return accepted.
-        // "Straight approach" -> maybe just await it so user sees errors?
-        // But browser timeout is 2 mins usually. Import can take longer.
-        // Better to run in background.
-
-        _ = Task.Run(async () =>
-        {
-            try
-            {
-                await importService.ImportCatalogAsync(id, type, CancellationToken.None);
-                //await libraryManager
-                //    .ValidateMediaLibrary(new Progress<double>(), CancellationToken.None)
-                //    .ConfigureAwait(false);
-            }
-            catch (Exception ex)
-            {
-                logger.LogError(ex, "Error in manual import for {Id}", id);
-            }
-        });
-
-        return Task.FromResult<ActionResult>(Accepted());
+        var config = catalogService.GetCatalogConfig(id, type);
+        if (config is null) return Task.FromResult<ActionResult>(NotFound());
+        if (!config.Enabled) return Task.FromResult<ActionResult>(BadRequest("Catalog is disabled"));
+        return Task.FromResult<ActionResult>(importQueue.TryQueue(id, type)
+            ? Accepted() : StatusCode(429, "The import queue is full"));
     }
 
     [HttpPost("import-all")]
@@ -82,20 +59,7 @@ public class CatalogController(
     {
         logger.LogInformation("Manual import triggered for all enabled catalogs");
 
-        _ = Task.Run(() =>
-        {
-            try
-            {
-                taskManager.CancelIfRunningAndQueue<GelatoCatalogItemsSyncTask>();
-            }
-            catch (Exception ex)
-            {
-                logger.LogError(ex, "Error in manual import for all enabled catalogs");
-            }
-
-            return Task.CompletedTask;
-        });
-
+        taskManager.QueueScheduledTask<GelatoCatalogItemsSyncTask>();
         return Accepted();
     }
 }

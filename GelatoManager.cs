@@ -1,6 +1,7 @@
 using System.Diagnostics;
 using System.Globalization;
 using Gelato.Config;
+using Gelato.Services;
 using Gelato.Decorators;
 using Jellyfin.Data.Enums;
 using Jellyfin.Database.Implementations.Entities;
@@ -20,19 +21,20 @@ using Microsoft.Extensions.Logging;
 
 namespace Gelato;
 
-public sealed class GelatoManager(
+public sealed partial class GelatoManager(
     ILoggerFactory loggerFactory,
     IProviderManager provider,
     GelatoItemRepository repo,
     IItemPersistenceService persistence,
     IFileSystem fileSystem,
-    IMemoryCache memoryCache,
+    GelatoCache memoryCache,
     IServerConfigurationManager serverConfig,
     ILibraryManager libraryManager,
     IDirectoryService directoryService,
     IApplicationPaths appPaths,
     IUserManager userManager,
-    IUserDataManager userDataManager
+    IUserDataManager userDataManager,
+    TorrentAccess torrentAccess
 )
 {
     public const string StreamTag = "gelato-stream";
@@ -48,7 +50,7 @@ public sealed class GelatoManager(
     public const string SeedFileContent =
         "This is a seed file created by Gelato so that library scans are triggered. Do not remove.";
 
-    private readonly ILogger<GelatoManager> _log = loggerFactory.CreateLogger<GelatoManager>();
+    private readonly ILogger<GelatoManager> _log = new RedactingLogger<GelatoManager>(loggerFactory);
 
     private int GetHttpPort()
     {
@@ -58,7 +60,7 @@ public sealed class GelatoManager(
 
     public void SetStremioSubtitlesCache(Guid guid, List<StremioSubtitle> subs)
     {
-        memoryCache.Set($"subs:{guid}", subs, TimeSpan.FromMinutes(3600));
+        memoryCache.Set($"subs:{guid}", subs, TimeSpan.FromHours(1));
     }
 
     public List<StremioSubtitle>? GetStremioSubtitlesCache(Guid guid)
@@ -66,12 +68,12 @@ public sealed class GelatoManager(
         return memoryCache.Get<List<StremioSubtitle>>($"subs:{guid}");
     }
 
-    public void SetStreamSync(string guid)
+    public void SetStreamSync(string guid, TimeSpan? ttl = null)
     {
         memoryCache.Set(
             $"streamsync:{guid}",
             guid,
-            TimeSpan.FromSeconds(GelatoPlugin.Instance!.Configuration.StreamTTL)
+            ttl ?? TimeSpan.FromSeconds(Math.Max(1, GelatoPlugin.Instance!.Configuration.StreamTTL))
         );
     }
 
@@ -97,10 +99,7 @@ public sealed class GelatoManager(
 
     public void ClearCache()
     {
-        if (memoryCache is MemoryCache cache)
-        {
-            cache.Compact(1.0);
-        }
+        memoryCache.Clear();
 
         _log.LogDebug("Cache cleared");
     }
@@ -267,68 +266,23 @@ public sealed class GelatoManager(
     }
 
     /// <summary>
-    /// Returns the movie or episode a stream row is a version of, or null.
-    /// </summary>
-    public BaseItem? FindPrimaryForStream(BaseItem streamRow, User? user = null)
-    {
-        if (streamRow is Episode episode)
-        {
-            // Same lookup GetStaticMediaSources uses to find an episode's stream rows.
-            var episodeQuery = new InternalItemsQuery
-            {
-                IncludeItemTypes = [BaseItemKind.Episode],
-                ParentId = episode.SeasonId,
-                IndexNumber = episode.IndexNumber,
-                Recursive = false,
-                ExcludeTags = [StreamTag],
-                User = user,
-                IsDeadPerson = true, // skip filter marker
-            };
-
-            return libraryManager.GetItemList(episodeQuery).FirstOrDefault(x => !x.HasStreamTag());
-        }
-
-        // Stream rows copy all of the primary's provider ids, and some are shared between
-        // movies: every movie of a collection has the same TmdbCollection id. Match on the
-        // Stremio id the row was synced for instead - the association GetStaticMediaSources
-        // uses to list a movie's rows.
-        var stremioId = streamRow.GetProviderId("Stremio");
-        if (string.IsNullOrEmpty(stremioId))
-            return null;
-
-        var query = new InternalItemsQuery
-        {
-            IncludeItemTypes = [streamRow.GetBaseItemKind()],
-            // A local movie has no Stremio id; its stream rows use its Imdb id.
-            HasAnyProviderId = new Dictionary<string, string>
-            {
-                { "Stremio", stremioId },
-                { nameof(MetadataProvider.Imdb), stremioId },
-            },
-            Recursive = true,
-            ExcludeTags = [StreamTag],
-            User = user,
-            IsDeadPerson = true, // skip filter marker
-        };
-
-        var candidates = libraryManager
-            .GetItemList(query)
-            .Where(x =>
-                !x.HasStreamTag()
-                && StremioUri.FromBaseItem(x)?.ExternalId == stremioId
-            )
-            .ToList();
-
-        // A movie that exists more than once (two libraries, per-user folders) matches more
-        // than once. SyncStreams puts a row in the same folder as its movie, so prefer that one.
-        return candidates.FirstOrDefault(x => x.ParentId == streamRow.ParentId)
-            ?? candidates.FirstOrDefault();
-    }
-
-    /// <summary>
     /// Inserts metadata into the library. Skip if it already exists.
     /// </summary>
-    public async Task<(BaseItem? Item, bool Created)> InsertMeta(
+    private readonly KeyLock _metadataWrites = new();
+
+    public Task<(BaseItem? Item, bool Created)> InsertMeta(
+        Folder parent,
+        StremioMeta meta,
+        User? user,
+        bool allowRemoteRefresh,
+        bool refreshItem,
+        bool queueRefreshItem,
+        CancellationToken ct
+    )
+        => _metadataWrites.RunQueuedAsync(new StremioUri(meta.Type, meta.ImdbId ?? meta.Id).ToGuid(),
+            token => InsertMetaCore(parent, meta, user, allowRemoteRefresh, refreshItem, queueRefreshItem, token), ct);
+
+    private async Task<(BaseItem? Item, bool Created)> InsertMetaCore(
         Folder parent,
         StremioMeta meta,
         User? user,
@@ -523,251 +477,6 @@ public sealed class GelatoManager(
     /// sorting. We make sure to keep a one stable version based on primaryversionid
     /// </summary>
     /// <returns></returns>
-    public async Task<int> SyncStreams(BaseItem item, Guid userId, CancellationToken ct)
-    {
-        _log.LogDebug($"SyncStreams for {item.Id}");
-        var stopwatch = Stopwatch.StartNew();
-        if (item is not Video video)
-        {
-            _log.LogWarning(
-                "SyncStreams: item is not a Video type, itemType={ItemType}",
-                item.GetType().Name
-            );
-            return 0;
-        }
-
-        if (video.IsStream())
-        {
-            _log.LogWarning("SyncStreams: item is a stream, skipping");
-            return 0;
-        }
-
-        var isEpisode = video is Episode;
-        var parent = isEpisode ? video.GetParent() as Folder : TryGetMovieFolder(userId);
-        if (parent is null)
-        {
-            _log.LogWarning("SyncStreams: no parent, skipping");
-            return 0;
-        }
-
-        var uri = StremioUri.FromBaseItem(video);
-        if (uri is null)
-        {
-            _log.LogError($"Unable to build Stremio URI for {video.Name}");
-            return 0;
-        }
-
-        var streamProviderIds = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
-        foreach (var (providerId, value) in video.ProviderIds)
-        {
-            streamProviderIds[providerId] = value;
-        }
-        streamProviderIds["Stremio"] = uri.ExternalId;
-
-        var cfg = GelatoPlugin.Instance!.GetConfig(userId);
-        var stremio = cfg.Stremio;
-        var streams = await stremio.GetStreamsAsync(uri).ConfigureAwait(false);
-        var httpPort = GetHttpPort();
-
-        // Filter valid streams
-        var acceptable = streams
-            .Select(s =>
-            {
-                if (!s.IsValid())
-                {
-                    _log.LogWarning("Invalid stream, skipping {StreamName}", s.Name);
-                    return null;
-                }
-
-                if (!cfg.P2PEnabled && s.IsTorrent())
-                {
-                    _log.LogDebug($"P2P stream, skipping {s.Name}");
-                    return null;
-                }
-
-                return s;
-            })
-            .Where(s => s is not null)
-            .ToList();
-
-        // Get existing streams. A movie's rows only by Stremio id: movies of a collection share
-        // the TmdbCollection id, and the other movies' rows would be treated as stale below.
-        // Episodes keep matching on all ids, which also finds rows synced under an older
-        // Stremio id (GetStaticMediaSources lists episode rows by season and index).
-        var query = new InternalItemsQuery
-        {
-            IncludeItemTypes = [isEpisode ? BaseItemKind.Episode : BaseItemKind.Movie],
-            HasAnyProviderId = isEpisode
-                ? streamProviderIds
-                : new Dictionary<string, string> { { "Stremio", uri.ExternalId } },
-            Recursive = true,
-            IsDeadPerson = true,
-            //  IsVirtualItem = true,
-        };
-
-        var existingStreamItems = repo.GetItemList(query)
-            .OfType<Video>()
-            .Where(v => v.IsStream())
-            .ToList();
-
-        // Match stream rows by persisted Gelato guid, not by volatile playback URL/path.
-        var existingByGuid = new Dictionary<Guid, Video>();
-        foreach (var existingItem in existingStreamItems)
-        {
-            var existingGuid = existingItem.GelatoData<Guid?>("guid");
-            if (existingGuid is null || existingGuid == Guid.Empty)
-            {
-                // Strict guid matching: ignore rows without a persisted guid.
-                continue;
-            }
-
-            if (!existingByGuid.TryAdd(existingGuid.Value, existingItem))
-            {
-                // Guard against bad historical data; don't fail sync on collisions.
-                _log.LogWarning(
-                    "Duplicate stream guid found during sync: {Guid}. Keeping first item id={FirstId}, ignoring item id={SecondId}",
-                    existingGuid.Value,
-                    existingByGuid[existingGuid.Value].Id,
-                    existingItem.Id
-                );
-            }
-        }
-
-        var upsertedStreams = new List<Video>();
-
-        for (var i = 0; i < acceptable.Count; i++)
-        {
-            var s = acceptable[i];
-            var index = i + 1;
-            var path = s.IsFile()
-                ? s.Url
-                : $"http://127.0.0.1:{httpPort}/gelato/stream?ih={s.InfoHash}"
-                    + (s.FileIdx is not null ? $"&idx={s.FileIdx}" : "")
-                    + (
-                        s.Sources is { Count: > 0 }
-                            ? $"&trackers={Uri.EscapeDataString(string.Join(',', s.Sources))}"
-                            : ""
-                    );
-
-            var streamGuid = s.GetGuid();
-            var isNewStreamItem = !existingByGuid.TryGetValue(streamGuid, out var streamItem);
-
-            if (isNewStreamItem)
-            {
-                streamItem =
-                    isEpisode && video is Episode e
-                        ? new Episode
-                        {
-                            //Id = libraryManager.GetNewItemId(path, typeof(Episode)),
-                            SeriesId = e.SeriesId,
-                            SeriesName = e.SeriesName,
-                            SeasonId = e.SeasonId,
-                            SeasonName = e.SeasonName,
-                            IndexNumber = e.IndexNumber,
-                            ParentIndexNumber = e.ParentIndexNumber,
-                            PremiereDate = e.PremiereDate,
-                        }
-                        : new Movie
-                        {
-                            //Id = libraryManager.GetNewItemId(path, typeof(Movie))
-                        };
-                streamItem.Path = path;
-                streamItem.Id = libraryManager.GetNewItemId(streamItem.Path, streamItem.GetType());
-            }
-
-            streamItem.Name = video.Name;
-            streamItem.Tags = [StreamTag];
-
-            var locked = streamItem.LockedFields?.ToList() ?? [];
-            if (!locked.Contains(MetadataField.Tags))
-                locked.Add(MetadataField.Tags);
-            streamItem.LockedFields = locked.ToArray();
-
-            streamItem.ProviderIds = streamProviderIds;
-            streamItem.RunTimeTicks = video.RunTimeTicks ?? video.RunTimeTicks;
-            streamItem.LinkedAlternateVersions = [];
-            streamItem.SetPrimaryVersionId(null);
-            streamItem.PremiereDate = video.PremiereDate;
-            streamItem.Path = path;
-            streamItem.IsVirtualItem = false;
-            streamItem.SetParent(parent);
-
-            var users = streamItem.GelatoData<List<Guid>>("userIds") ?? [];
-            if (!users.Contains(userId))
-            {
-                users.Add(userId);
-                streamItem.SetGelatoData("userIds", users);
-            }
-
-            streamItem.SetGelatoData("name", s.Name);
-            streamItem.SetGelatoData("description", s.Description);
-            if (!string.IsNullOrEmpty(s.BehaviorHints?.BingeGroup))
-            {
-                streamItem.SetGelatoData("bingeGroup", s.BehaviorHints.BingeGroup);
-            }
-            if (!string.IsNullOrEmpty(s.BehaviorHints?.Filename))
-            {
-                streamItem.SetGelatoData("filename", s.BehaviorHints.Filename);
-            }
-            streamItem.SetGelatoData("index", index);
-            streamItem.SetGelatoData("guid", streamGuid);
-            // Keep map current so stale detection below uses the final upserted set.
-            existingByGuid[streamGuid] = streamItem;
-
-            upsertedStreams.Add(streamItem);
-        }
-
-        //upsertedStreams = SaveItems(upsertedStreams, (Folder)primary.GetParent()).Cast<Video>().ToList();
-        persistence.SaveItems(upsertedStreams, ct);
-
-        var newIds = new HashSet<Guid>(upsertedStreams.Select(x => x.Id));
-        var stale = existingByGuid
-            .Values.Where(m =>
-                !newIds.Contains(m.Id)
-                && (m.GelatoData<List<Guid>>("userIds")?.Contains(userId) ?? false)
-            )
-            .ToList();
-
-        foreach (var _item in stale)
-        {
-            var users = _item.GelatoData<List<Guid>>("userIds") ?? [];
-            users.Remove(userId);
-            _item.SetGelatoData("userIds", users);
-        }
-
-        var toDelete = stale
-            .Where(item => item.GelatoData<List<Guid>>("userIds") is { Count: 0 })
-            .ToList();
-        var toSave = stale.Except(toDelete).ToList();
-
-        try
-        {
-            //persistence.DeleteItem([.. toDelete.Select(f => f.Id)]);
-        }
-        catch
-        {
-            foreach (var staleItem in toDelete)
-            {
-                libraryManager.DeleteItem(
-                    staleItem,
-                    new DeleteOptions { DeleteFileLocation = true },
-                    true
-                );
-            }
-        }
-
-        persistence.SaveItems(toSave, ct);
-        upsertedStreams.Add(video);
-
-        stopwatch.Stop();
-
-        _log.LogInformation(
-            $"SyncStreams finished GelatoId={uri.ExternalId} userId={userId} duration={Math.Round(stopwatch.Elapsed.TotalSeconds, 1)}s streams={upsertedStreams.Count}"
-        );
-
-        return acceptable.Count;
-    }
-
     /// <summary>
     /// We only check permissions cause jellyfin excludes remote items by default
     /// </summary>

@@ -2,6 +2,7 @@
 #pragma warning disable CS1591
 
 using System;
+using Gelato.Services;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
@@ -30,7 +31,7 @@ namespace Gelato.Providers
 
         // Static so the cache is shared across all instances — Jellyfin may create
         // provider instances via its own assembly scanning, separate from the DI container.
-        private static readonly IMemoryCache _cache = new MemoryCache(new MemoryCacheOptions());
+        private static readonly GelatoCache _cache = new();
 
         public SubtitleProvider(
             IHttpClientFactory http,
@@ -60,22 +61,30 @@ namespace Gelato.Providers
             CancellationToken ct
         )
         {
-            var listKey = ListCacheKey(id, mediaType);
+            var cfg = GelatoPlugin.Instance!.GetConfig(Guid.Empty);
+            if (cfg.Stremio is null) return Array.Empty<StremioSubtitle>();
+            var listKey = (cfg.Stremio, ListCacheKey(id, mediaType));
 
             if (
                 _cache.TryGetValue(listKey, out IReadOnlyList<StremioSubtitle>? cached)
                 && cached is not null
             )
             {
-                _log.LogDebug("Subtitle list cache HIT key={Key}", listKey);
+                _log.LogDebug("Subtitle list cache hit for {ItemId}", id);
                 return cached;
             }
 
-            _log.LogDebug("Subtitle list cache MISS key={Key}", listKey);
+            _log.LogDebug("Subtitle list cache miss for {ItemId}", id);
 
-            var cfg = GelatoPlugin.Instance!.GetConfig(Guid.Empty);
-            var subs = await cfg.Stremio!.GetSubtitlesAsync(id, mediaType).ConfigureAwait(false);
+            var subs = await cfg.Stremio!.GetSubtitlesAsync(id, mediaType, ct).ConfigureAwait(false);
 
+            // Addon IDs are not necessarily unique across titles or addon configurations.
+            subs = subs.Select(s =>
+            {
+                s.Id = Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(
+                    System.Text.Encoding.UTF8.GetBytes(s.Id + "\n" + s.Url)));
+                return s;
+            }).ToList();
             _cache.Set(listKey, (IReadOnlyList<StremioSubtitle>)subs, CacheTtl);
 
             foreach (var s in subs)
@@ -95,8 +104,15 @@ namespace Gelato.Providers
             {
                 // Prefer the filename stored in GelatoData (set from BehaviorHints.Filename during stream
                 // insertion), since the stream URL often doesn't contain a meaningful filename.
+                // Stream rows are alternate versions, which Jellyfin leaves out of queries by default.
                 var streamItem = _library
-                    .GetItemList(new InternalItemsQuery { Path = request.MediaPath })
+                    .GetItemList(
+                        new InternalItemsQuery
+                        {
+                            Path = request.MediaPath,
+                            IncludeOwnedItems = true,
+                        }
+                    )
                     .FirstOrDefault();
                 var gelatoFilename = streamItem?.GelatoData<string>("filename");
 
@@ -249,7 +265,10 @@ namespace Gelato.Providers
                 throw new FileNotFoundException($"Subtitle not found for id {id}");
             }
 
-            var client = _http.CreateClient(nameof(SubtitleProvider));
+            using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+            timeout.CancelAfter(TimeSpan.FromSeconds(30));
+            cancellationToken = timeout.Token;
+            using var client = _http.CreateClient(nameof(SubtitleProvider));
             using var resp = await client.GetAsync(
                 sub.Url,
                 HttpCompletionOption.ResponseHeadersRead,
@@ -258,19 +277,29 @@ namespace Gelato.Providers
             if (!resp.IsSuccessStatusCode)
             {
                 _log.LogError(
-                    "Failed to download subtitle id={Id} from {Url}. Status={Status}",
+                    "Failed to download subtitle id={Id}. Status={Status}",
                     id,
-                    sub.Url,
                     resp.StatusCode
                 );
                 throw new IOException($"Failed to download subtitles: {resp.StatusCode}");
             }
 
+            // Subtitle files are small; reject oversized responses before allocating unbounded memory.
+            const int maxBytes = 8 * 1024 * 1024;
+            if (resp.Content.Headers.ContentLength > maxBytes) throw new IOException("Subtitle is too large");
             var ms = new MemoryStream();
-            await (await resp.Content.ReadAsStreamAsync(cancellationToken)).CopyToAsync(
-                ms,
-                cancellationToken
-            );
+            try
+            {
+                await using var body = await resp.Content.ReadAsStreamAsync(cancellationToken);
+                var buffer = new byte[16384];
+                int read;
+                while ((read = await body.ReadAsync(buffer, cancellationToken)) != 0)
+                {
+                    if (ms.Length + read > maxBytes) throw new IOException("Subtitle is too large");
+                    await ms.WriteAsync(buffer.AsMemory(0, read), cancellationToken);
+                }
+            }
+            catch { ms.Dispose(); throw; }
             ms.Position = 0;
 
             return new SubtitleResponse

@@ -136,68 +136,6 @@ public static class Utils
     }
 }
 
-public sealed class KeyLock
-{
-    private readonly ConcurrentDictionary<Guid, SemaphoreSlim> _queues = new();
-    private readonly ConcurrentDictionary<Guid, Lazy<Task>> _inflight = new();
-
-    public Task RunSingleFlightAsync(
-        Guid key,
-        Func<CancellationToken, Task> action,
-        CancellationToken ct = default
-    )
-    {
-        var lazy = _inflight.GetOrAdd(
-            key,
-            _ => new Lazy<Task>(
-                () => Once(key, action, ct),
-                LazyThreadSafetyMode.ExecutionAndPublication
-            )
-        );
-        return lazy.Value;
-    }
-
-    public async Task RunQueuedAsync(
-        Guid key,
-        Func<CancellationToken, Task> action,
-        CancellationToken ct = default
-    )
-    {
-        var sem = _queues.GetOrAdd(key, _ => new SemaphoreSlim(1, 1));
-        await sem.WaitAsync(ct).ConfigureAwait(false);
-        try
-        {
-            await action(ct).ConfigureAwait(false);
-        }
-        finally
-        {
-            ReleaseAndMaybeRemove(key, sem);
-        }
-    }
-
-    private async Task Once(Guid key, Func<CancellationToken, Task> action, CancellationToken ct)
-    {
-        try
-        {
-            await action(ct).ConfigureAwait(false);
-        }
-        finally
-        {
-            _inflight.TryRemove(key, out _);
-        }
-    }
-
-    private void ReleaseAndMaybeRemove(Guid key, SemaphoreSlim sem)
-    {
-        sem.Release();
-        if (sem.CurrentCount == 1 && sem.Wait(0))
-        {
-            sem.Release();
-            _queues.TryRemove(key, out _);
-        }
-    }
-}
-
 public static class EnumMappingExtensions
 {
     public static StremioMediaType ToStremio(this BaseItemKind kind)
@@ -500,6 +438,10 @@ public static class BaseItemExtensions
     {
         return !string.IsNullOrWhiteSpace(item.GetProviderId("Stremio"));
     }
+
+    public static bool IsGelatoPlaybackItem(this BaseItem item) =>
+        item.HasStreamTag()
+        || (item.Path?.StartsWith("gelato://", StringComparison.OrdinalIgnoreCase) ?? false);
 
     public static bool HasStreamTag(this BaseItem item)
     {

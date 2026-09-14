@@ -1,4 +1,4 @@
-﻿name: PR Build
+name: PR Build
 on:
   pull_request:
     types:
@@ -13,30 +13,27 @@ permissions:
 jobs:
   lint:
     runs-on: ubuntu-latest
-    if: github.event.pull_request.draft == false
     steps:
       - name: Checkout repo
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         
       - name: .NET Lint
-        uses: zyactions/dotnet-lint@v1
+        uses: zyactions/dotnet-lint@a86bc2ec7f63119966cf70cafb56de1c2681cc85
         with:
           workspace: Gelato.sln
           implicit-restore: true
   
   conventional-commits:
     runs-on: ubuntu-latest
-    if: github.event.pull_request.draft == false
     steps:
       - name: Checkout repo
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
 
       - name: Check conventional commits
-        uses: webiny/action-conventional-commits@v1.3.1
+        uses: webiny/action-conventional-commits@faccb24fc2550dd15c0390d944379d2d8ed9690e
 
   build:
-    uses: jellyfin/jellyfin-meta-plugins/.github/workflows/build.yaml@master
-    if: github.event.pull_request.draft == false
+    uses: jellyfin/jellyfin-meta-plugins/.github/workflows/build.yaml@d9efb2cf637399fac7068ab1ee382079b1fcfa5a
     with:
       dotnet-version: "10.0.*"
       dotnet-target: "net10.0"

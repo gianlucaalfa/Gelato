@@ -2,6 +2,9 @@
 
 using System.ComponentModel.DataAnnotations;
 using System.Net;
+using Gelato.Services;
+using MediaBrowser.Controller.Library;
+using MediaBrowser.Controller.Entities;
 using System.Text.RegularExpressions;
 using MediaBrowser.Common.Configuration;
 using Microsoft.AspNetCore.Authorization;
@@ -19,14 +22,23 @@ public sealed class GelatoApiController : ControllerBase
     private readonly ILogger<GelatoApiController> _log;
     private readonly GelatoManager _gelatoManager;
     private readonly string _downloadPath;
+    private readonly TorrentAccess _access;
+    private readonly TorrentSessionService _sessions;
+    private readonly ILibraryManager _library;
+    private readonly IUserManager _users;
 
     public GelatoApiController(
         ILogger<GelatoApiController> log,
         IApplicationPaths appPaths,
-        GelatoManager gelatoManager
+        GelatoManager gelatoManager,
+        TorrentAccess access, TorrentSessionService sessions, ILibraryManager library, IUserManager users
     )
     {
         _log = log;
+        _access = access;
+        _sessions = sessions;
+        _library = library;
+        _users = users;
         _gelatoManager = gelatoManager;
         _downloadPath = Path.Combine(appPaths.CachePath, "gelato-torrents");
         Directory.CreateDirectory(_downloadPath);
@@ -39,8 +51,10 @@ public sealed class GelatoApiController : ControllerBase
         [FromRoute, Required] string id
     )
     {
-        var cfg = GelatoPlugin.Instance!.GetConfig(Guid.Empty);
-        var meta = await cfg.Stremio.GetMetaAsync(id, stremioMetaType);
+        if (!HttpContext.TryGetUserId(out var userId)) return Unauthorized();
+        var cfg = GelatoPlugin.Instance!.GetConfig(userId);
+        if (cfg.Stremio is null) return NotFound();
+        var meta = await cfg.Stremio.GetMetaAsync(id, stremioMetaType, ct: HttpContext.RequestAborted);
         if (meta is null)
         {
             return NotFound();
@@ -51,11 +65,15 @@ public sealed class GelatoApiController : ControllerBase
     // [HttpGet("catalogs")]
     // Moved to CatalogController
 
+    [Authorize]
     [HttpGet("subtitles/{itemId:guid}")]
     public ActionResult<IEnumerable<StremioSubtitle>> GetSubtitles(
         [FromRoute, Required] Guid itemId
     )
     {
+        if (!HttpContext.TryGetUserId(out var userId) || _users.GetUserById(userId) is not { } user
+            || _library.GetItemById<BaseItem>(itemId, user) is null)
+            return NotFound();
         var subs = _gelatoManager.GetStremioSubtitlesCache(itemId);
         return Ok(subs ?? new List<StremioSubtitle>());
     }
@@ -65,9 +83,12 @@ public sealed class GelatoApiController : ControllerBase
         [FromQuery] string ih,
         [FromQuery] int? idx,
         [FromQuery] string? filename,
-        [FromQuery] string? trackers
+        [FromQuery] string? trackers,
+        [FromQuery] string? token
     )
     {
+        if (GelatoPlugin.Instance?.Configuration.P2PEnabled != true) return StatusCode(403);
+        if (!_access.Validate(token, ih, idx, trackers)) return Unauthorized();
         var remoteIp = HttpContext.Connection.RemoteIpAddress;
         if (
             remoteIp == null
@@ -90,24 +111,27 @@ public sealed class GelatoApiController : ControllerBase
             MaximumUploadRate = GelatoPlugin.Instance.Configuration.P2PULSpeed,
         }.ToSettings();
 
-        var engine = new ClientEngine(settings);
-
-        var infoHashes =
-            TryParseInfoHashes(ih)
-            ?? throw new ArgumentException("Invalid infohash or magnet.", nameof(ih));
-        var announce = ParseTrackers(trackers) ?? DefaultTrackers();
-        var magnet = new MagnetLink(infoHashes, name: null, announceUrls: announce);
-
-        var manager = await engine.AddStreamingAsync(magnet, _downloadPath);
-        await manager.StartAsync();
-
-        if (!manager.HasMetadata)
+        var infoHashes = TryParseInfoHashes(ih);
+        if (infoHashes is null) return BadRequest("Invalid infohash or magnet");
+        var lease = await _sessions.OpenAsync(settings, ct).ConfigureAwait(false);
+        // ASP.NET disposes registered resources when response processing ends, including exceptions.
+        Response.RegisterForDisposeAsync(lease);
+        using var metadataTimeout = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        metadataTimeout.CancelAfter(TimeSpan.FromSeconds(60));
+        TorrentManager manager;
+        try
         {
-            while (!manager.HasMetadata && !ct.IsCancellationRequested)
-                await Task.Delay(100, ct);
-
-            if (!manager.HasMetadata)
-                return StatusCode(503, "Metadata not yet available.");
+            var announce = ParseTrackers(trackers) ?? DefaultTrackers();
+            var magnet = new MagnetLink(infoHashes, name: null, announceUrls: announce);
+            manager = await lease.Engine.AddStreamingAsync(magnet, _downloadPath).WaitAsync(metadataTimeout.Token);
+            lease.Manager = manager;
+            await manager.StartAsync().WaitAsync(metadataTimeout.Token);
+            while (!manager.HasMetadata) await Task.Delay(100, metadataTimeout.Token);
+        }
+        catch
+        {
+            await lease.DisposeAsync();
+            throw;
         }
 
         var selected =
@@ -126,70 +150,9 @@ public sealed class GelatoApiController : ControllerBase
                         : PickHeuristic(manager)
                 );
 
-        var timerCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
-        var timer = new Timer(
-            _ =>
-            {
-                _log.LogDebug(
-                    "file: {File}, progress: {Progress:0.00}%, dl: {DL}/s, ul: {UL}/s, peers: {Peers}, seeds: {Seeds}, leechers: {Leechs}, bytes: {Bytes}",
-                    selected.Path,
-                    manager.Progress,
-                    manager.Monitor.DownloadRate,
-                    manager.Monitor.UploadRate,
-                    manager.Peers.Available,
-                    manager.Peers.Seeds,
-                    manager.Peers.Leechs,
-                    manager.Monitor.DataBytesReceived
-                );
-            },
-            null,
-            TimeSpan.Zero,
-            TimeSpan.FromSeconds(10)
-        );
-
-        _log.LogInformation($"starting torrent stream for {selected.Path}");
-        var stream = await manager.StreamProvider.CreateStreamAsync(selected, ct);
-
-        // Register cleanup for both normal completion and cancellation
-        ct.Register(() =>
-        {
-            _log.LogInformation("Client disconnected. Cleaning up resources...");
-            try
-            {
-                timerCts.Cancel();
-            }
-            catch
-            {
-                // ignored
-            }
-
-            try
-            {
-                timer.Dispose();
-            }
-            catch
-            {
-                // ignored
-            }
-
-            try
-            {
-                manager.StopAsync().GetAwaiter().GetResult();
-            }
-            catch
-            {
-                // ignored
-            }
-
-            try
-            {
-                engine.Dispose();
-            }
-            catch
-            {
-                // ignored
-            }
-        });
+        Stream stream;
+        try { stream = await manager.StreamProvider.CreateStreamAsync(selected, ct); }
+        catch { await lease.DisposeAsync(); throw; }
 
         Response.Headers.AcceptRanges = "bytes";
         return File(stream, GuessContentType(selected.Path), enableRangeProcessing: true);
