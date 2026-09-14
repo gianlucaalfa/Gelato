@@ -55,12 +55,16 @@ jobs:
         run: python .github/scripts/package_hardening.py
       - name: Verify package in Jellyfin 12
         run: python .github/scripts/smoke_jellyfin.py
+      - name: Verify package in LinuxServer Jellyfin 12
+        env:
+          JELLYFIN_FLAVOR: linuxserver
+        run: python .github/scripts/smoke_jellyfin.py
       - name: Upload server smoke logs
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: jellyfin-smoke-logs
-          path: jellyfin-smoke.log
+          path: jellyfin-smoke-*.log
       - name: Publish prerelease and independent feed
         env:
           GH_TOKEN: ${{ github.token }}

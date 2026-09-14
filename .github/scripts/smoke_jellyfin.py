@@ -9,15 +9,20 @@ import urllib.error
 import urllib.request
 import zipfile
 
-root = Path(os.environ["RUNNER_TEMP"]) / "gelato-smoke"
+flavor = os.environ.get("JELLYFIN_FLAVOR", "official")
+if flavor not in ("official", "linuxserver"):
+    raise ValueError("Unknown Jellyfin image flavor")
+linuxserver = flavor == "linuxserver"
+root = Path(os.environ["RUNNER_TEMP"]) / ("gelato-smoke-" + flavor)
 config = root / "config"
 cache = root / "cache"
-plugin = config / "plugins" / ("Gelato_" + os.environ["PLUGIN_VERSION"])
+data = config / "data" if linuxserver else config
+plugin = data / "plugins" / ("Gelato_" + os.environ["PLUGIN_VERSION"])
 plugin.mkdir(parents=True)
 cache.mkdir(parents=True)
 with zipfile.ZipFile(next(Path("hardening-package").glob("*.zip"))) as archive:
     archive.extractall(plugin)
-container = "gelato-hardening-smoke"
+container = "gelato-hardening-smoke-" + flavor
 base = "http://127.0.0.1:18096"
 auth_header = 'MediaBrowser Client="GelatoRegression", Device="CI", DeviceId="gelato-smoke", Version="1.0"'
 
@@ -51,10 +56,20 @@ def wait_ready(token=None):
     raise RuntimeError("Jellyfin did not become ready")
 
 try:
-    subprocess.run(["docker", "run", "--detach", "--name", container,
-                    "--publish", "127.0.0.1:18096:8096",
-                    "--volume", f"{config}:/config", "--volume", f"{cache}:/cache",
-                    "jellyfin/jellyfin:12.0@sha256:baba630419915985442f315f08b0cf46d9f4c8a0cc4bd38e94a6d35751dd5ef5"], check=True)
+    image = (
+        "lscr.io/linuxserver/jellyfin:12.0ubu2604-ls48@sha256:0f42497a69fa0441bfd5f9d6bba8694f2a656ec984e571d0ac04c6dd91250039"
+        if linuxserver else
+        "jellyfin/jellyfin:12.0@sha256:baba630419915985442f315f08b0cf46d9f4c8a0cc4bd38e94a6d35751dd5ef5"
+    )
+    arguments = ["docker", "run", "--detach", "--name", container,
+                 "--publish", "127.0.0.1:18096:8096", "--volume", f"{config}:/config"]
+    if linuxserver:
+        # LinuxServer keeps DataPath below /config/data and runs Jellyfin as abc.
+        # Use the production UID/GID convention with an isolated, empty data directory.
+        arguments += ["--env", "PUID=1000", "--env", "PGID=1000", "--env", "TZ=Europe/Rome"]
+    else:
+        arguments += ["--volume", f"{cache}:/cache"]
+    subprocess.run(arguments + [image], check=True)
     wait_ready()
     request("/Startup/User")
     password = secrets.token_urlsafe(24)
@@ -76,9 +91,9 @@ try:
     subprocess.run(["docker", "restart", container], check=True)
     wait_ready(admin)
     assert request("/Palco/Cache/smtp-config?ns=anfiteatro-registration", token=admin)["value"] == value
-    print("Jellyfin 12 smoke passed: package loading, anonymous/user/admin policies, disabled registration, SMTP restart persistence")
+    print(f"Jellyfin 12 ({flavor}) smoke passed: package loading, anonymous/user/admin policies, disabled registration, SMTP restart persistence")
 finally:
     logs = subprocess.run(["docker", "logs", container], capture_output=True, text=True)
-    Path("jellyfin-smoke.log").write_text(logs.stdout + logs.stderr)
+    Path(f"jellyfin-smoke-{flavor}.log").write_text(logs.stdout + logs.stderr)
     print("\n".join((logs.stdout + logs.stderr).splitlines()[-120:]))
     subprocess.run(["docker", "rm", "--force", container], check=False)
