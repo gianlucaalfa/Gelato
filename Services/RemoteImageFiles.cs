@@ -13,6 +13,7 @@ public static class RemoteImageFiles
         lock (Gate(path))
         {
             Directory.CreateDirectory(Path.GetDirectoryName(path)!);
+            if (File.Exists(path)) return;
             // OpenOrCreate never truncates an image another request already downloaded.
             using var file = new FileStream(path, FileMode.OpenOrCreate, FileAccess.Write, FileShare.ReadWrite | FileShare.Delete);
         }

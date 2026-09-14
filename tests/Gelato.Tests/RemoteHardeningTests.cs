@@ -121,6 +121,25 @@ public class RemoteHardeningTests
     }
 
     [Fact]
+    public void ExistingReadOnlyImagesDoNotRequireWriteAccess()
+    {
+        var directory = Directory.CreateTempSubdirectory("gelato-readonly-image-");
+        var path = Path.Combine(directory.FullName, "Primary.jpg");
+        try
+        {
+            File.WriteAllBytes(path, [1, 2, 3]);
+            File.SetAttributes(path, FileAttributes.ReadOnly);
+            RemoteImageFiles.EnsurePlaceholder(path);
+            Assert.Equal(new byte[] { 1, 2, 3 }, File.ReadAllBytes(path));
+        }
+        finally
+        {
+            File.SetAttributes(path, FileAttributes.Normal);
+            directory.Delete(true);
+        }
+    }
+
+    [Fact]
     public void ImageSidecarErrorsAreNotSilentlyIgnored()
     {
         var directory = Directory.CreateTempSubdirectory("gelato-image-error-");
