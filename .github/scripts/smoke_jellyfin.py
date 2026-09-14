@@ -42,7 +42,9 @@ def request(path, method="GET", data=None, token=None, expected=200):
     return json.loads(body, object_hook=lambda value: {key.lower(): item for key, item in value.items()}) if body else None
 
 def wait_ready(token=None):
-    for _ in range(90):
+    deadline = time.monotonic() + 180
+    next_diagnostic = time.monotonic() + 30
+    while time.monotonic() < deadline:
         try:
             info = request("/System/Info/Public")
             if not info.get("version", "").startswith("12."):
@@ -51,7 +53,14 @@ def wait_ready(token=None):
             # Probe an actual controller, both on first boot and after restart.
             request("/Plugins" if token else "/Startup/User", token=token)
             return
-        except (OSError, AssertionError):
+        except (OSError, AssertionError) as error:
+            if time.monotonic() >= next_diagnostic:
+                print(f"Waiting for {flavor} Jellyfin readiness ({type(error).__name__})", flush=True)
+                logs = subprocess.run(["docker", "logs", "--tail", "120", container],
+                                      capture_output=True, text=True, timeout=10)
+                Path(f"jellyfin-smoke-{flavor}.log").write_text(logs.stdout + logs.stderr)
+                print(logs.stdout + logs.stderr, flush=True)
+                next_diagnostic = time.monotonic() + 30
             time.sleep(2)
     raise RuntimeError("Jellyfin did not become ready")
 

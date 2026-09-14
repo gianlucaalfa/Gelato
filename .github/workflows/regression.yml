@@ -54,8 +54,10 @@ jobs:
       - name: Package declared dependencies
         run: python .github/scripts/package_hardening.py
       - name: Verify package in Jellyfin 12
+        timeout-minutes: 10
         run: python .github/scripts/smoke_jellyfin.py
       - name: Verify package in LinuxServer Jellyfin 12
+        timeout-minutes: 10
         env:
           JELLYFIN_FLAVOR: linuxserver
         run: python .github/scripts/smoke_jellyfin.py
