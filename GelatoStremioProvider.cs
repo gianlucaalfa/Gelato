@@ -134,9 +134,9 @@ public class GelatoStremioProvider(
         }
     }
 
-    public async Task<bool> IsReady()
+    public async Task<bool> IsReady(CancellationToken ct = default)
     {
-        var m = await GetManifestAsync();
+        var m = await GetManifestAsync(ct: ct);
         return m is not null;
     }
 
