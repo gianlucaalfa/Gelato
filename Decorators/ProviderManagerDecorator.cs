@@ -1,3 +1,4 @@
+using Gelato.Services;
 using Jellyfin.Data.Events;
 using MediaBrowser.Common.Configuration;
 using MediaBrowser.Controller.Entities;
@@ -44,7 +45,7 @@ public sealed class ProviderManagerDecorator(
             // Always persist the URL at the gelato fake path so it can be resolved on demand
             // regardless of LazyImages mode — this is the permanent source-of-truth for the URL.
             var info = BuildImageInfo(appPaths, item.Id, type, imageIndex);
-            File.WriteAllText(info.Path + ".url", url);
+            RemoteImageFiles.WriteUrl(info.Path, url);
 
             if (GelatoPlugin.Instance?.Configuration.LazyImages == true)
             {
@@ -85,7 +86,7 @@ public sealed class ProviderManagerDecorator(
         var info = BuildImageInfo(appPaths, item.Id, type, imageIndex);
         // Store the remote URL in a sidecar file next to the placeholder.
         // ImageResourceFilter reads this file to proxy the image.
-        File.WriteAllText(info.Path + ".url", url);
+        RemoteImageFiles.WriteUrl(info.Path, url);
         item.SetImage(info, imageIndex ?? 0);
     }
 
@@ -105,9 +106,7 @@ public sealed class ProviderManagerDecorator(
             fileName
         );
 
-        Directory.CreateDirectory(Path.GetDirectoryName(fakePath)!);
-        if (!File.Exists(fakePath))
-            File.WriteAllBytes(fakePath, Array.Empty<byte>());
+        RemoteImageFiles.EnsurePlaceholder(fakePath);
 
         return new ItemImageInfo
         {

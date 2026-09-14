@@ -50,7 +50,7 @@ public sealed partial class GelatoManager(
     public const string SeedFileContent =
         "This is a seed file created by Gelato so that library scans are triggered. Do not remove.";
 
-    private readonly ILogger<GelatoManager> _log = loggerFactory.CreateLogger<GelatoManager>();
+    private readonly ILogger<GelatoManager> _log = new RedactingLogger<GelatoManager>(loggerFactory);
 
     private int GetHttpPort()
     {

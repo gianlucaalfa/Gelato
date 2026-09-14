@@ -177,7 +177,7 @@ public class GelatoStremioProviderFactory(IHttpClientFactory http, ILoggerFactor
         var baseUrl = cfg.GetBaseUrl();
         return _cache.GetOrAdd(
             baseUrl,
-            url => new GelatoStremioProvider(url, http, log.CreateLogger<GelatoStremioProvider>())
+            url => new GelatoStremioProvider(url, http, new Gelato.Services.RedactingLogger<GelatoStremioProvider>(log))
         );
     }
 

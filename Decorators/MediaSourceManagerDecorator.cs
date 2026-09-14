@@ -476,8 +476,7 @@ public sealed class MediaSourceManagerDecorator(
     }
 
     private static bool IsGelatoPlaybackItem(BaseItem item) =>
-        item.HasStreamTag()
-        || (item.Path?.StartsWith("gelato://", StringComparison.OrdinalIgnoreCase) ?? false);
+        item.IsGelatoPlaybackItem();
 
     public Task<MediaSourceInfo> GetMediaSource(
         BaseItem item,

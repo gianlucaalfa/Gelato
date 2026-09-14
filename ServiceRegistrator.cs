@@ -1,4 +1,6 @@
 using Gelato.Config;
+using MediaBrowser.Controller.Chapters;
+using MediaBrowser.Controller.Trickplay;
 using MediaBrowser.Common.Configuration;
 using Microsoft.AspNetCore.DataProtection;
 using Gelato.Decorators;
@@ -30,6 +32,7 @@ public class ServiceRegistrator : IPluginServiceRegistrator
 {
     public void RegisterServices(IServiceCollection services, IServerApplicationHost host)
     {
+        SafeLog.Register(services);
         // Configured addon paths can contain credentials; suppress HttpClient URL logging.
         services.AddHttpClient(nameof(GelatoStremioProvider)).RemoveAllLoggers();
         services.AddHttpClient(nameof(SubtitleProvider)).RemoveAllLoggers();
@@ -120,7 +123,9 @@ public class ServiceRegistrator : IPluginServiceRegistrator
             .DecorateSingle<IPlaylistManager, PlaylistManagerDecorator>()
             .DecorateSingle<ISubtitleManager, SubtitleManagerDecorator>()
             .DecorateSingle<IProviderManager, ProviderManagerDecorator>()
-            .DecorateSingle<IImageProcessor, ImageProcessorDecorator>();
+            .DecorateSingle<IImageProcessor, ImageProcessorDecorator>()
+            .DecorateSingle<IChapterManager, ChapterManagerDecorator>()
+            .DecorateSingle<ITrickplayManager, TrickplayManagerDecorator>();
         // Expose the concrete decorator as Lazy so ImageProcessorDecorator can call SaveImageDirect
         // without introducing a circular dependency at construction time.
         services.AddSingleton(sp => new Lazy<ProviderManagerDecorator>(

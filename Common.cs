@@ -439,6 +439,10 @@ public static class BaseItemExtensions
         return !string.IsNullOrWhiteSpace(item.GetProviderId("Stremio"));
     }
 
+    public static bool IsGelatoPlaybackItem(this BaseItem item) =>
+        item.HasStreamTag()
+        || (item.Path?.StartsWith("gelato://", StringComparison.OrdinalIgnoreCase) ?? false);
+
     public static bool HasStreamTag(this BaseItem item)
     {
         return item.Tags is not null

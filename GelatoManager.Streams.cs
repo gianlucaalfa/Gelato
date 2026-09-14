@@ -204,6 +204,8 @@ public sealed partial class GelatoManager
             var locked = streamItem.LockedFields?.ToList() ?? [];
             if (!locked.Contains(MetadataField.Tags))
                 locked.Add(MetadataField.Tags);
+            if (!locked.Contains(MetadataField.Name))
+                locked.Add(MetadataField.Name);
             streamItem.LockedFields = locked.ToArray();
 
             streamItem.ProviderIds = streamProviderIds;
